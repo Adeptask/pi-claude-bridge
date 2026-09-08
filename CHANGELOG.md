@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Tests: session-resume tripped the API's transcript guard** — its AskClaude shared/isolated turns now run after the first provider exchange; a transcript holding a second "recall the words" exchange made the API refuse the request ("safeguards flagged this message" / `[reasoning_extraction]`) regardless of how the question was worded.
 - **Add: Claude Fable 5.1** — `claude-bridge/claude-fable-5-1`, selected by the `fable` shortcut, with 1M context. Requires Claude Code 2.1.251 or newer, so the bundled Agent SDK is bumped to 0.3.263 (Claude Code 2.1.263).
 - **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition (new file, staging, commit) rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
 - **Fix: rate-limit warning showed 1% and repeated every request** — the SDK reports `utilization` as a fraction (0.98), but the notification rounded it directly, printing "1% used" at 98% of the window. It now shows true percentages and only re-notifies when usage rises past a new 5% step or the threshold changes, instead of once per request while over the threshold.
