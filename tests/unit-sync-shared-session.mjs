@@ -57,6 +57,36 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	it("starts fresh for equal-length history from an independent runtime", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		let sessionId;
+		try {
+			const historyA = [
+				{ role: "user", content: "private history A", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "answer A" }], timestamp: 2 },
+				{ role: "user", content: "next A", timestamp: 3 },
+			];
+			const historyB = [
+				{ role: "user", content: "private history B", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "answer B" }], timestamp: 2 },
+				{ role: "user", content: "next B", timestamp: 3 },
+			];
+			sessionId = __test.syncSharedSession(historyA, cwd).sessionId;
+			assert.ok(sessionId);
+			assert.match(JSON.stringify(openSession({ sessionId, projectPath: cwd }).messages), /private history A/);
+
+			const second = __test.syncSharedSession(historyB, cwd);
+			assert.equal(second.sessionId, null);
+			assert.equal(second.preserveSharedSession, true);
+			const preserved = JSON.stringify(openSession({ sessionId, projectPath: cwd }).messages);
+			assert.match(preserved, /private history A/);
+			assert.doesNotMatch(preserved, /private history B/);
+		} finally {
+			if (sessionId) deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The rebuilt file holds one line per record, and a carried `@file` expansion
 	// is an `attachment` record — which `session.messages` filters out. Counting
 	// messages told every user who at-mentioned a file before switching providers

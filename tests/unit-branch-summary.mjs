@@ -20,7 +20,7 @@ const { default: activate, __test } = await import("../src/index.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();
-	activate({ on: (event, handler) => handlers.set(event, handler), registerProvider: () => {} });
+	activate({ on: (event, handler) => handlers.set(event, handler), registerProvider: () => {}, registerTool: () => {} });
 	return handlers;
 }
 
