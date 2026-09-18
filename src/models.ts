@@ -116,7 +116,6 @@ export function resolveClaudeCodeRuntimeModel(
 		};
 	}
 	// No measured row: bare id at 200K, the safe default (see diag/CONTEXT-SIZE.md).
-	console.error(`claude-bridge: model ${modelId} has no measured 1M policy; serving 200K`);
 	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 }
 

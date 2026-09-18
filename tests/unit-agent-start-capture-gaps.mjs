@@ -5,18 +5,23 @@
  *
  * The agent_start record keys the prompt pi renders from the final before_agent_start
  * options (ctx.getSystemPrompt()), carrying the stashed portable parts. That fixes the
- * widened-dispatch case (see unit-agent-start-capture.mjs). Three reported failure
- * shapes still fall outside it:
+ * widened-dispatch case (see unit-agent-start-capture.mjs). The reported failure shapes
+ * that still fall outside it:
  *
  * 1. Isolated subagents (issue #64): a re-evaluated bridge module keeps its own capture
  *    map while the shared stream function still resolves against the first instance's
  *    map, so the child's own records land in a map nobody reads.
  * 2. Tail-stripped inheritance (issue #88): a child embedding its parent prompt minus
  *    pi's per-session tail (skills catalogue, cwd footer) matches no full-prompt key.
- * 3. A prompt replaced wholesale after before_agent_start (the forceSystemPrompt path,
- *    issue #102's shape): the forced text is neither the rendered options nor an
- *    embedding of any recorded key. Same for a prompt that widens again mid-run
- *    (issue #91's multi-turn shape): agent_start fires once per run, not per turn.
+ *    (gotgenes/pi-subagents strips the tail; elidickinson/pi-subagents embeds verbatim
+ *    and is covered by the agent_start record.)
+ * 3. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
+ *    pi-web-ui shape) is neither a rendered-options key, a handler-returned force
+ *    (which agent_start does capture — see the force test below), nor an embedding.
+ * 4. A prompt that changes mid-run (issue #91's multi-turn shape): agent_start fires
+ *    once per run, not per turn, so a later turn's re-rendered prompt is unrecorded.
+ *    (The re-render path is pi's section-based prompt, post-0.85.1; on 0.85.1 a mid-run
+ *    setActiveToolsByName change has the same effect.)
  */
 
 import { describe, it } from "node:test";
@@ -69,17 +74,32 @@ describe("agent_start capture — documented gaps", () => {
 		);
 	});
 
-	it("does not rescue a prompt replaced wholesale after before_agent_start (#102 shape)", () => {
+	it("does capture a handler-returned wholesale replacement: it resolves via the agent_start key", () => {
+		const handlers = activateWithMockPi();
+		handlers.get("before_agent_start")({ systemPrompt: "pi rendered prompt", systemPromptOptions: {} });
+		// A before_agent_start handler that RETURNS a system prompt forces it as the request
+		// head, and pi renders ctx.getSystemPrompt() as exactly that forced text
+		// (buildSystemPromptState returns forceSystemPrompt verbatim).
+		handlers.get("agent_start")({}, { getSystemPrompt: () => "forced replacement prompt owning the request head" });
+
+		const capture = __test.promptCaptures.resolve("forced replacement prompt owning the request head");
+		assert.ok(capture, "the forced text becomes a capture key at agent_start");
+		// Caveat pinned by design: only the portable parts are projected for Claude Code;
+		// the forced text's own novel prose is not forwarded (forwarding pi-harness-shaped
+		// prose would trip the server's third-party gate).
+	});
+
+	it("does not rescue a prompt composed outside the before_agent_start pipeline (#102 shape)", () => {
 		const handlers = activateWithMockPi();
 		handlers.get("before_agent_start")({ systemPrompt: "pi rendered prompt", systemPromptOptions: {} });
 		handlers.get("agent_start")({}, { getSystemPrompt: () => "pi rendered prompt" });
 
-		// A before_agent_start handler that RETURNS a system prompt forces it as the
-		// request head; the forced text is not buildSystemPrompt(options) output.
+		// A host composing the prompt from its own template outside pi's pipeline —
+		// neither a rendered-options key, a handler-returned force, nor an embedding.
 		assert.throws(
-			() => __test.promptCaptures.resolveOrDerive("wholesale replacement prompt owning the request head"),
+			() => __test.promptCaptures.resolveOrDerive("host-composed prompt owning the request head"),
 			/no capture/,
-			"a forced replacement is neither a recorded key nor an embedding of one",
+			"out-of-pipeline composition is neither a recorded key nor an embedding of one",
 		);
 	});
 

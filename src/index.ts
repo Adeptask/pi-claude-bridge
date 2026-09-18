@@ -2081,6 +2081,11 @@ export default function (pi: ExtensionAPI) {
 	// too, the child's turn resolves against nothing, falls to a verbatim side request,
 	// and ships pi's harness — tripping the server's third-party plan-eligibility check
 	// ("out of extra usage"). Recording it here, before the query, restores the match.
+	//
+	// The widening needs pi's section-based prompt (post-0.85.1); on 0.85.1 the prompt is
+	// a fixed string and this record is a redundant-but-harmless second key that still
+	// catches a later handler rewriting the prompt (it also captures a handler-returned
+	// forceSystemPrompt, which buildSystemPrompt renders verbatim).
 	pi.on("agent_start", (_event, ctx) => {
 		recordSystemPrompt(ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
