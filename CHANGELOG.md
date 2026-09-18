@@ -2,13 +2,14 @@
 
 ## UNRELEASED
 
-- **Add: Claude Fable 5.1** — `claude-bridge/claude-fable-5-1`, selectable via the `fable` shortcut with 1M context. Requires Claude Code 2.1.251 or newer, so `@anthropic-ai/claude-agent-sdk` is bumped to `^0.3.267` (Claude Code 2.1.267); the version gate had rejected the request with `400 ... version 2.1.251 or newer is required`. `@anthropic-ai/sdk` moves to `^0.124.0` per the new SDK's peer range (types only).
-- **Tests: session-resume tripped the API's transcript guard** — its AskClaude shared/isolated turns now run after the first provider exchange; a transcript holding a second "recall the words" exchange made the API refuse the request ("safeguards flagged this message" / `[reasoning_extraction]`) regardless of how the question was worded.
+- **Add: Claude Fable 5.1** — `claude-bridge/claude-fable-5-1`, selectable via the `fable` shortcut with 1M context. Requires Claude Code 2.1.251 or newer, so `@anthropic-ai/claude-agent-sdk` is bumped to `^0.3.267`. `@anthropic-ai/sdk` moves to `^0.124.0` per the new SDK's peer range (types only).
 - **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition (new file, staging, commit) rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
 - **Fix: rate-limit warning showed 1% and repeated every request** — the SDK reports `utilization` as a fraction (0.98), but the notification rounded it directly, printing "1% used" at 98% of the window. It now shows true percentages and only re-notifies when usage rises past a new 5% step or the threshold changes, instead of once per request while over the threshold.
 - **Fix: an exhausted Claude subscription never triggered fallback models (issue #58)** — Claude Code words a spent quota as "You're out of extra usage · resets 6:30pm", which names no recognizable symptom, so pi-subagents' `fallbackModels` and similar retry logic read it as a fatal error. A failure preceded by a rate-limit rejection is now labelled as one, with its limit type and reset time. Also fixes the rate-limit notification showing a 1970 reset time.
 - **Fix: better isolate AskClaude tool (issue #59)** — AskClaude children no longer inherit the user's `~/.claude` `CLAUDE.md` files or skill listing, and now always get Claude Code's system prompt preset instead of only when pi-side skills exist. Thanks @JAtkinsonKO.
 - **Fix: Bogus debug message about "record count mismatch" after switching providers** — the post-rebuild integrity check did not take `@file` expansion into account when switching providers.
+- **Tests: session-resume tripped the API's transcript guard** — its AskClaude shared/isolated turns now run after the first provider exchange; a transcript holding a second "recall the words" exchange made the API refuse the request ("safeguards flagged this message" / `[reasoning_extraction]`) regardless of how the question was worded.
+- **Tests: branch-summary unit suite failed on machines with AskClaude globally enabled** — the mock `pi` was missing `registerTool`, which `activate()` calls when the config enables it (PR #95).
 
 ## 0.7.0 — 2026-08-08
 
