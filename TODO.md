@@ -33,17 +33,28 @@ that does not exist yet, or on someone else's repo.
    empty-signature case still needs the WARNING at `:1056` to tell "we minted
    nothing" apart from "another provider minted it".
 
-3. **Delete `reasoningText`** (`src/index.ts:825`): `reasoning=` appears in 0 of
+3. **Correct maxTokens for today's models in buildModels.** pi-ai's declared
+   `maxTokens` (128K opus/sonnet/fable, 64K haiku) matches nothing CC actually
+   serves, per the June 26 context-size captures
+   (`.test-output/context-size/*.json`): opus-4-6/4-7 serve 64K, opus-4-8 /
+   sonnet-4-6/haiku-4-5 serve 32K. pi consumes model.maxTokens for
+   length-stop recoverability and compaction budgets, so over-reporting
+   misclassifies a length-stopped turn as recoverable. Only worth doing when
+   those models get re-measured anyway — a fresh probe run supersedes these
+   copies; for unmeasured models register the measured floor (32000), never
+   pi-ai's declaration.
+
+4. **Delete `reasoningText`** (`src/index.ts:825`): `reasoning=` appears in 0 of
    14,994 `usage:` lines, so the SDK never supplies the field. Right now it reads
    as a working diagnostic. Delete it or record why it stays.
 
-4. **Fail an int run that logs `BUG:` or an unexpected `WARNING:`.** Those lines
+5. **Fail an int run that logs `BUG:` or an unexpected `WARNING:`.** Those lines
    mean a real defect and the int suite can emit them while passing — the
    stuck-handler bug shipped exactly that way. `diag/audit-warnings.mjs` already
    parses them; the gap is that no test consults it. Needs an explicit allowlist
    for the tests that induce one on purpose.
 
-5. **Stop the benchmark harness manufacturing the phantom-tool-call condition.**
+6. **Stop the benchmark harness manufacturing the phantom-tool-call condition.**
    Replay calls the conversion without a populated `customToolNameToSdk` map, so
    pi's `bash` is rebuilt as Claude Code's builtin `Bash` — the prompt condition
    behind the deadlock fixed in 122914dd. A benchmark run can therefore reproduce
@@ -51,12 +62,12 @@ that does not exist yet, or on someone else's repo.
    recorded tool list through to `convertPiMessages`. Production is unaffected
    (verified over 86,652 real pi messages).
 
-6. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** — the
+7. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** — the
    QueryContext lifecycle × sync-path coverage map is in a gitignored directory, so
    nobody else gets it. Belongs in `docs/` or as a section of `diag/AUDIT.md`. (The
    provenance rule is already in `AGENTS.md`.)
 
-7. **Give every query its own `QueryContext`.** A top-level query reuses the
+8. **Give every query its own `QueryContext`.** A top-level query reuses the
    module-level singleton while a reentrant one gets a fresh context, so the same
    teardown code serves two different lifetimes and `activeQuery` answers three
    different questions: is a top-level query in flight (1389), which SDK query owns
@@ -90,7 +101,7 @@ that does not exist yet, or on someone else's repo.
    that microtask gap would take the delivery branch and return a stream nobody
    ends.
 
-8. **A mid-turn steer shifts the attachment ordinal space, losing every later
+9. **A mid-turn steer shifts the attachment ordinal space, losing every later
    `@file` carry.** The two sides count prompts differently. Claude Code records a
    drained steer as a `queued_command` attachment whose parent is a tool_result
    record, so `collectCarriedAttachments` gives it no ordinal (`userPromptText`
