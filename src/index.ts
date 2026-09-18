@@ -2002,6 +2002,7 @@ export default function (pi: ExtensionAPI) {
 	longContextSettings = {
 		plan: providerSettings.plan ?? "pro",
 		longContextExtraUsage: providerSettings.longContextExtraUsage ?? false,
+		forceTwoHundredK: providerSettings.forceTwoHundredK,
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
