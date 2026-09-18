@@ -1999,12 +1999,20 @@ export default function (pi: ExtensionAPI) {
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};
 	// We need these settings to know if we're eligible for 1M context on certain models
+	// Validate at the boundary: a non-array here would throw inside every
+	// claudeCodeModelId call and brick the extension at activation.
+	const forceTwoHundredK = Array.isArray(providerSettings.forceTwoHundredK)
+		? providerSettings.forceTwoHundredK.filter((id): id is string => typeof id === "string")
+		: undefined;
 	longContextSettings = {
 		plan: providerSettings.plan ?? "pro",
 		longContextExtraUsage: providerSettings.longContextExtraUsage ?? false,
-		forceTwoHundredK: providerSettings.forceTwoHundredK,
+		forceTwoHundredK,
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
+	if (registeredModels.length === 0) {
+		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.85.0)");
+	}
 
 	if (!config.startupNoticeShown) {
 		if (config.provider?.plan === undefined) pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');

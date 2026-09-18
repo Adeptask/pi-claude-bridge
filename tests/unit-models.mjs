@@ -78,28 +78,36 @@ describe("MODELS projection", () => {
 });
 
 describe("resolveModel", () => {
-	it("opus shortcut resolves to claude-opus-5 (newest opus in order)", () => {
-		assert.equal(resolveModel(buildModels(getModels("anthropic")), "opus")?.id, "claude-opus-5");
+	const models = buildModels(getModels("anthropic"));
+
+	it("opus shortcut resolves to claude-opus-5 (newest opus)", () => {
+		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
 	});
 
-	it("haiku shortcut resolves to claude-haiku-4-5", () => {
-		assert.equal(resolveModel(buildModels(getModels("anthropic")), "haiku")?.id, "claude-haiku-4-5");
+	it("exact id beats newer partial match (claude-fable-5 → fable-5, not 5-1)", () => {
+		assert.equal(resolveModel(models, "claude-fable-5")?.id, "claude-fable-5");
 	});
 
-	it("full ID resolves to itself", () => {
-		assert.equal(resolveModel(buildModels(getModels("anthropic")), "claude-opus-4-6")?.id, "claude-opus-4-6");
-	});
-
-	it("returns undefined when no match", () => {
-		assert.equal(resolveModel(buildModels(getModels("anthropic")), "gpt-9"), undefined);
+	describe("Fable 5.1", () => {
+		// Lives in pi-ai's catalog natively since 0.85.0; entries missing from it are
+		// silently dropped by buildModels (pinned above).
+		it("requests the 1M runtime id for Fable 5.1", () => {
+			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM("claude-fable-5-1"), PRO), {
+				cliModelId: "claude-fable-5-1[1m]", contextWindow: 1000000,
+			});
+		});
 	});
 });
 
 describe("Claude Code runtime policy", () => {
-	it("declared 1M maps to [1m] id — measured: the suffix is the only reliable 1M request", () => {
-		for (const id of ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5"]) {
+	it("measured-1M ids send [1m] on every plan", () => {
+		for (const id of ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5"]) {
 			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM(id), PRO), { cliModelId: `${id}[1m]`, contextWindow: 1000000 });
 		}
+	});
+
+	it("unmeasured ids serve bare at 200K even when pi-ai declares 1M (sonnet-4-5)", () => {
+		assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM("claude-sonnet-4-5"), PRO), { cliModelId: "claude-sonnet-4-5", contextWindow: 200000 });
 	});
 
 	it("declared 200K maps to bare id", () => {
@@ -140,11 +148,20 @@ describe("claudeCodeModelId", () => {
 describe("applyLongContext", () => {
 	const models = buildModels(getModels("anthropic"));
 
-	it("registers 1M for declared-1M models", () => {
+	it("registers 1M for measured-1M models", () => {
 		const registered = applyLongContext(models, PRO);
 		assert.equal(find(registered, "claude-opus-5").contextWindow, 1000000);
 		assert.equal(find(registered, "claude-opus-4-7").contextWindow, 1000000);
 		assert.equal(find(registered, "claude-fable-5-1").contextWindow, 1000000);
+	});
+
+	it("leaves unmeasured sonnet-4-5 at 200K", () => {
+		assert.equal(find(applyLongContext(models, PRO), "claude-sonnet-4-5").contextWindow, 200000);
+	});
+
+	it("haiku shortcut and no-match still resolve", () => {
+		assert.equal(resolveModel(models, "haiku")?.id, "claude-haiku-4-5");
+		assert.equal(resolveModel(models, "gpt-9"), undefined);
 	});
 
 	it("plan gates only the measured exceptions", () => {

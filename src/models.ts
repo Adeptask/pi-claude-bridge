@@ -15,30 +15,33 @@ function isDatedAlias(id: string): boolean {
 	return /-20\d{6}$/.test(id);
 }
 
-// Newest generation first, so the shortcuts resolve to the latest member of
-// each family. Family tiers are ordered so flagship families sort first.
+// Family tiers for display order: flagship families first; unknown families
+// sink below all known ones.
 const FAMILY_ORDER = ["fable", "opus", "sonnet", "haiku"];
 
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
 // newest generation first. Context-dependent display labels are applied after
 // plan/long-context config is known.
+// Version rank of a claude id, e.g. claude-opus-4-7 → ["opus", 4, 7]. Shared by
+// the display sort and resolveModel's newest-first partial tiebreak.
+function versionRank(id: string): { family: string; tuple: [number, number] } {
+	const [, family, major, minor] = id.split("-");
+	return { family, tuple: [Number(major) || 0, Number(minor) || 0] };
+}
+
 export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
-	// Family tier ascending, then version descending. Unknown families get a
-	// sentinel that sinks them so they cannot steal first-partial-match shortcuts.
-	const rank = (id: string) => {
-		const [, family, major, minor] = id.split("-");
-		const fi = FAMILY_ORDER.indexOf(family);
-		return [fi === -1 ? FAMILY_ORDER.length : fi, Number(major) || 0, Number(minor) || 0];
-	};
 	return piAiModels
-		.filter((m) => !isDatedAlias(m.id))
+		.filter((m) => typeof m.id === "string" && !isDatedAlias(m.id))
 		.sort((a, b) => {
-			const ra = rank(a.id);
-			const rb = rank(b.id);
-			if (ra[0] !== rb[0]) return (ra[0] as number) - (rb[0] as number);
-			for (let i = 1; i < 3; i++) {
-				if (ra[i] !== rb[i]) return (rb[i] as number) - (ra[i] as number);
-			}
+			const fa = FAMILY_ORDER.indexOf(versionRank(a.id).family);
+			const fb = FAMILY_ORDER.indexOf(versionRank(b.id).family);
+			const ta = fa === -1 ? FAMILY_ORDER.length : fa;
+			const tb = fb === -1 ? FAMILY_ORDER.length : fb;
+			if (ta !== tb) return ta - tb;
+			const ra = versionRank(a.id).tuple;
+			const rb = versionRank(b.id).tuple;
+			if (ra[0] !== rb[0]) return rb[0] - ra[0];
+			if (ra[1] !== rb[1]) return rb[1] - ra[1];
 			return a.id.localeCompare(b.id);
 		})
 		// Forward thinkingLevelMap so pi-ai's per-model overrides (e.g. opus-4-8
@@ -68,11 +71,31 @@ export type ClaudeCodeRuntimeModel = {
 // Measured Claude Agent SDK behavior - see diag/CONTEXT-SIZE.md:
 // - The `[1m]` suffix is the only reliable way to request 1M context through
 //   the SDK; bare ids serve 200K.
+// - An unentitled `[1m]` id is rejected outright (400/429), failing every turn
+//   — worse than serving 200K, so the default is bare id at 200K and only
+//   measured-good ids get `[1m]`.
 // - The registered contextWindow must match the window the bridge actually
 //   requests, or pi's status bar and compaction threshold misreport.
-// Default policy follows pi-ai's declared contextWindow: declared 1M → `[1m]`
-// id registered at 1M. Deviations below exist only where measured behavior
-// contradicts the declaration.
+// [1m] ids verified to serve 1M on every plan. A new model serves 200K until
+// someone measures it (diag/context-size.mjs) and adds it here.
+const MEASURED_ONE_M = new Set([
+	"claude-fable-5",
+	"claude-fable-5-1",
+	"claude-opus-5",
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-sonnet-5",
+]);
+
+// Measured exceptions: pi-ai declares 1M and the [1m] id works, but only when
+// the plan allows it.
+const PLAN_GATED_ONE_M: Record<string, (settings: LongContextSettings) => boolean> = {
+	// [1m] measured 1M on Max plan / extra usage; 429 on Pro without it.
+	"claude-opus-4-6": (settings) => settings.plan === "max" || settings.longContextExtraUsage,
+	// [1m] measured 1M with extra usage only.
+	"claude-sonnet-4-6": (settings) => settings.longContextExtraUsage,
+};
+
 export function resolveClaudeCodeRuntimeModel(
 	model: { id: string; contextWindow?: number | null },
 	settings: LongContextSettings,
@@ -81,26 +104,18 @@ export function resolveClaudeCodeRuntimeModel(
 	if (settings.forceTwoHundredK?.includes(modelId)) {
 		return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 	}
-	switch (modelId) {
-		// pi-ai declares 1M, but the SDK only serves it when the plan allows.
-		case "claude-opus-4-6":
-		case "claude-sonnet-4-6": {
-			const useOneM = modelId === "claude-opus-4-6"
-				? settings.plan === "max" || settings.longContextExtraUsage
-				: settings.longContextExtraUsage;
-			return {
-				cliModelId: useOneM ? `${modelId}[1m]` : modelId,
-				contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
-			};
-		}
-		default:
-			// Treat a missing declaration as 200K: bare ids are measured to serve 200K,
-			// so bare id + 200K registration is self-consistent (safe side).
-			if ((model.contextWindow ?? TWO_HUNDRED_K_CONTEXT) > TWO_HUNDRED_K_CONTEXT) {
-				return { cliModelId: `${modelId}[1m]`, contextWindow: ONE_M_CONTEXT };
-			}
-			return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
+	if (MEASURED_ONE_M.has(modelId)) {
+		return { cliModelId: `${modelId}[1m]`, contextWindow: ONE_M_CONTEXT };
 	}
+	const planGate = PLAN_GATED_ONE_M[modelId];
+	if (planGate) {
+		const useOneM = planGate(settings);
+		return {
+			cliModelId: useOneM ? `${modelId}[1m]` : modelId,
+			contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
+		};
+	}
+	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 }
 
 export function claudeCodeModelId(model: { id: string; contextWindow?: number | null }, settings: LongContextSettings): string {
@@ -109,7 +124,21 @@ export function claudeCodeModelId(model: { id: string; contextWindow?: number | 
 
 export function resolveModel<T extends { id: string }>(models: T[], input: string): T | undefined {
 	const lower = input.toLowerCase();
-	return models.find((m) => m.id === lower || m.id.includes(lower));
+	// Exact first, then partial (mirrors pi's tryMatchModel ordering), so a
+	// longer newer id containing the input (claude-fable-5-1 vs "claude-fable-5")
+	// cannot shadow the exact match.
+	return models.find((m) => m.id === lower)
+		?? newestPartialMatch(models.filter((m) => m.id.includes(lower)));
+}
+
+// Newest match by version rank — independent of registration order.
+function newestPartialMatch<T extends { id: string }>(candidates: T[]): T | undefined {
+	if (candidates.length === 0) return undefined;
+	return candidates.reduce((best, m) => {
+		const [vb, vbest] = [versionRank(m.id).tuple, versionRank(best.id).tuple];
+		const newer = vb[0] !== vbest[0] ? vb[0] > vbest[0] : vb[1] > vbest[1];
+		return newer ? m : best;
+	});
 }
 
 // Produce the model metadata registered with pi. The registered contextWindow must
