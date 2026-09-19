@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Fix: claude-bridge models resolve in subagent children whose host gives them their own model registry (issue #91's foreground failure)** — later bridge instances no longer skip provider registration unconditionally; they register at `session_start` when their session's registry lacks the provider, and stay hands-off when the host passed the parent's registry down (where re-registering would overwrite the parent's pinned stream fn). Previously even declaring the bridge via the agent's `extensions:` frontmatter left the child's registry empty, failing every `claude-bridge/*` dispatch with "Model not found".
 - **Fix: isolated subagents can resolve their captured system prompt (issue #64)** — captures now live in one process-wide registry shared across extension module instances, matching how the provider stream is already pinned.
 - **Fix: mid-run prompt re-renders stay resolvable** — the bridge re-keys the current system prompt at `turn_start`, so a prompt rebuilt between turns (tool-loadout changes on 0.85.1) resolves instead of failing the turn. On pi main's section-based prompt nothing resolves yet — see the provider-path TODO.
 - **Add: prompt-capture throw diagnostics name the recording boundary** — when resolution fails, the error reports which boundary last recorded the closest known prompt.
