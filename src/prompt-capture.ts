@@ -20,6 +20,8 @@ type InheritedPrompt = {
 
 export type PromptCapture = PromptCaptureInput & {
 	assembledPrompt: string;
+	/** Which bridge boundary last recorded this key (before_agent_start | agent_start | turn_start). */
+	source?: string;
 	/** Exact previously assembled prompts embedded in `custom`. */
 	inherited: InheritedPrompt[];
 };
@@ -43,7 +45,7 @@ export type PromptCaptureDiagnostic = {
 	 *  fresh resource discovery), which edits near the boundary, and a prefix key
 	 *  gets us to within a handful of characters of where. */
 	systemPrompt: string;
-	matches: { key: string; firstDivergent: number }[];
+	matches: { key: string; firstDivergent: number; source?: string }[];
 };
 
 export class PromptCaptures {
@@ -69,7 +71,7 @@ export class PromptCaptures {
 		this.onDiagnose = onDiagnose ?? (() => {});
 	}
 
-	record(systemPrompt: string, input: PromptCaptureInput): void {
+	record(systemPrompt: string, input: PromptCaptureInput, source?: string): void {
 		const existing = this.captures.get(systemPrompt);
 		const customChanged = existing?.custom !== input.custom;
 		const capture = existing ?? {
@@ -84,6 +86,7 @@ export class PromptCaptures {
 		capture.append = input.append;
 		capture.contextFiles = input.contextFiles.map((file) => ({ ...file }));
 		capture.skills = [...input.skills];
+		capture.source = source;
 		if (!existing || customChanged) {
 			capture.inherited = this.findInheritedPrompts(systemPrompt, input.custom);
 		}
@@ -158,7 +161,8 @@ export class PromptCaptures {
 			this.onDiagnose({ systemPrompt, matches });
 			throw new Error(
 				`prompt-capture: no capture for this ${systemPrompt.length}-char system prompt, and it embeds none of the ${this.captures.size} known. `
-				+ `Closest known match diverges at offset ${matches[0]?.firstDivergent ?? "?"} (${matches.length ? matches[0].key.length : 0}-char key). `
+				+ `Closest known match diverges at offset ${matches[0]?.firstDivergent ?? "?"} `
+				+ `(${matches.length ? matches[0].key.length : 0}-char key${matches[0]?.source ? `, last recorded at ${matches[0].source}` : ""}). `
 				+ `Claude Code would receive none of this turn's context files, skills or custom instructions. `
 				+ `The usual cause is an extension loaded after claude-bridge that rewrites the system prompt from before_agent_start — `
 				+ `one that wraps it is fine, one that rebuilds or strips it leaves nothing to match. `
@@ -177,10 +181,10 @@ export class PromptCaptures {
 	}
 
 	/** Longest shared-prefix matches, best first, for the throw diagnostic. */
-	private closestKnown(systemPrompt: string): { key: string; firstDivergent: number }[] {
+	private closestKnown(systemPrompt: string): { key: string; firstDivergent: number; source?: string }[] {
 		let shared = 0;
-		const matches: { key: string; firstDivergent: number }[] = [];
-		for (const key of this.captures.keys()) {
+		const matches: { key: string; firstDivergent: number; source?: string }[] = [];
+		for (const [key, capture] of this.captures.entries()) {
 			const limit = Math.min(key.length, systemPrompt.length);
 			let i = 0;
 			while (i < limit && key.charCodeAt(i) === systemPrompt.charCodeAt(i)) i++;
@@ -189,7 +193,7 @@ export class PromptCaptures {
 					shared = i;
 					matches.length = 0;
 				}
-				matches.push({ key, firstDivergent: i });
+				matches.push({ key, firstDivergent: i, source: capture.source });
 			}
 		}
 		return matches;
@@ -230,6 +234,17 @@ export class PromptCaptures {
 		for (const capture of this.captures.values()) visit(capture);
 		return result;
 	}
+}
+
+const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
+
+/** Isolated agents re-evaluate this module; a process-wide instance lets the pinned
+ *  stream resolve their captures (issue #64). The first instance's onDiagnose wins —
+ *  later callers reuse the instance as-is. Never cleared at session_shutdown: identical
+ *  keys carry identical portable parts, so cross-session reuse is safe. */
+export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void): PromptCaptures {
+	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
+	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose));
 }
 
 export function projectPromptCapture(

@@ -8,17 +8,14 @@
  * widened-dispatch case (see unit-agent-start-capture.mjs). The reported failure shapes
  * that still fall outside it:
  *
- * 1. Isolated subagents (issue #64): a re-evaluated bridge module keeps its own capture
- *    map while the shared stream function still resolves against the first instance's
- *    map, so the child's own records land in a map nobody reads.
- * 2. Tail-stripped inheritance (issue #88): a child embedding its parent prompt minus
+ * 1. Tail-stripped inheritance (issue #88): a child embedding its parent prompt minus
  *    pi's per-session tail (skills catalogue, cwd footer) matches no full-prompt key.
  *    (gotgenes/pi-subagents strips the tail; elidickinson/pi-subagents embeds verbatim
  *    and is covered by the agent_start record.)
- * 3. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
+ * 2. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
  *    pi-web-ui shape) is neither a rendered-options key, a handler-returned force
  *    (which agent_start does capture — see the force test below), nor an embedding.
- * 4. A prompt that changes mid-run (issue #91's multi-turn shape): agent_start fires
+ * 3. A prompt that changes mid-run (issue #91's multi-turn shape): agent_start fires
  *    once per run, not per turn, so a later turn's re-rendered prompt is unrecorded.
  *    (The re-render path is pi's section-based prompt, post-0.85.1; on 0.85.1 a mid-run
  *    setActiveToolsByName change has the same effect.)
@@ -40,9 +37,10 @@ function activateWithMockPi(activateFn) {
 }
 
 describe("agent_start capture — documented gaps", () => {
-	it("does not help isolated subagents that record into a fresh module instance (#64)", async () => {
+	it("makes isolated subagent captures resolve via the shared registry (#64)", async () => {
 		const parent = activateWithMockPi();
-		// An isolated agent re-evaluates the module; its records land in its own map.
+		// An isolated agent re-evaluates the module; its records land in the same
+		// process-wide registry the pinned stream resolves against.
 		const { default: activateFresh, __test: freshTest } = await import("../src/index.js?isolated-child");
 		const child = activateWithMockPi(activateFresh);
 
@@ -51,11 +49,11 @@ describe("agent_start capture — documented gaps", () => {
 		child.get("agent_start")({}, { getSystemPrompt: () => isolatedPrompt });
 
 		assert.ok(freshTest.promptCaptures.resolve(isolatedPrompt), "the child instance recorded its own prompt");
-		assert.throws(
-			() => __test.promptCaptures.resolveOrDerive(isolatedPrompt),
-			/no capture/,
-			"the parent-instance map the pinned stream resolves against still misses it",
+		assert.ok(
+			__test.promptCaptures.resolveOrDerive(isolatedPrompt),
+			"the shared registry the pinned stream resolves against resolves the child's prompt",
 		);
+		assert.equal(freshTest.promptCaptures, __test.promptCaptures, "both instances share one capture registry");
 	});
 
 	it("does not match a child embedding a tail-stripped parent prompt (#88)", () => {

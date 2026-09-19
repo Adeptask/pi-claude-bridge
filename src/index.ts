@@ -21,7 +21,7 @@ import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } f
 import {
 	collectPromptSkills,
 	projectPromptCapture,
-	PromptCaptures,
+	sharedPromptCaptures,
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
@@ -143,8 +143,8 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // the subagent's `streamSimple` (which has empty state) instead of its own.
 //
 // By storing the active streamSimple in a Symbol.for() global (shared across all
-// module instances), we ensure only the FIRST instance to register takes effect.
-// Subsequent instances wrap the stored function instead of overwriting it.
+// module instances), only the FIRST instance to register takes effect — later
+// instances find the key already set and skip registration entirely.
 //
 // On session_shutdown (including /reload), clearSession() resets this so a fresh
 // registration can occur for the next session.
@@ -853,8 +853,10 @@ function showStartupNoticeOnce(): void {
 }
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
-// is keyed rather than held in a single slot.
-const promptCaptures = new PromptCaptures(256, (diagnostic) => {
+// is keyed rather than held in a single slot. One process-wide instance, shared
+// across every extension module instance: isolated subagents re-evaluate this
+// module, and the pinned stream they all route through resolves against it.
+const promptCaptures = sharedPromptCaptures((diagnostic) => {
 	const first = diagnostic.matches[0];
 	debug(
 		`prompt-capture: no match for ${diagnostic.systemPrompt.length}-char system prompt. `
@@ -1556,6 +1558,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
 	// replaces that exact inherited prompt with its already-safe portable parts.
+	// TODO(pi post-0.85.1): the section-based prompt on pi main hands providers a transcript
+	// with no systemPrompt field — the prompt lives in the leading system messages
+	// (getCurrentSystemPrompt(context.messages)). When that ships, derive the key here;
+	// context.systemPrompt will be undefined and resolve to nothing (silent, not a throw).
 	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
 	const systemPromptAppend = promptCapture
 		? projectPromptCapture(promptCapture, {
@@ -2050,9 +2056,9 @@ export default function (pi: ExtensionAPI) {
 	// The options (custom/append/contextFiles/skills) are pi config, stable across a
 	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
 	// at before_agent_start so the agent_start recording below can reuse them.
-	type RecordOptions = Parameters<typeof recordSystemPrompt>[1];
+	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
 	let lastSystemPromptOptions: RecordOptions | undefined;
-	function recordSystemPrompt(systemPrompt: string | undefined, options: {
+	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
 		customPrompt?: string;
 		appendSystemPrompt?: string;
 		contextFiles?: { path: string; content: string }[];
@@ -2066,11 +2072,11 @@ export default function (pi: ExtensionAPI) {
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
-		});
+		}, source);
 	}
 	pi.on("before_agent_start", (event) => {
 		lastSystemPromptOptions = event.systemPromptOptions;
-		recordSystemPrompt(event.systemPrompt, event.systemPromptOptions);
+		recordSystemPrompt("before_agent_start", event.systemPrompt, event.systemPromptOptions);
 	});
 	// The prompt the provider actually queries with is the fully-widened one: MCP tool
 	// descriptions merge into the system prompt only after their servers connect, which
@@ -2087,7 +2093,17 @@ export default function (pi: ExtensionAPI) {
 	// catches a later handler rewriting the prompt (it also captures a handler-returned
 	// forceSystemPrompt, which buildSystemPrompt renders verbatim).
 	pi.on("agent_start", (_event, ctx) => {
-		recordSystemPrompt(ctx.getSystemPrompt(), lastSystemPromptOptions);
+		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
+	});
+
+	// Mid-run re-renders: turn_start fires before every turn after the first, after
+	// prepareNextTurnWithContext re-rendered the options (pi's section-based prompt) and
+	// after any mid-run setActiveToolsByName rebuild (0.85.1). Re-keying at each boundary
+	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
+	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
+	// next before_agent_start — accepted: a stale skills list beats failing the turn.
+	pi.on("turn_start", (_event, ctx) => {
+		recordSystemPrompt("turn_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
 	pi.on("session_shutdown", () => {
 		reportLeaks("session_shutdown");
