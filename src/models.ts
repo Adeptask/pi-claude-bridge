@@ -2,8 +2,8 @@
 // driven by pi-ai's anthropic catalog: models appear (and disappear) with it,
 // no per-model code here. Extracted from index.ts so tests can import without
 // activating the extension.
-// `resolveModel` returns the first partial match, so sort order decides which
-// member of a family the `opus`/`sonnet`/`fable` shortcuts resolve to.
+// `resolveModel` resolves family shortcuts (opus/sonnet/fable) to the newest
+// matching id regardless of sort order; sort order only drives picker display.
 
 const TWO_HUNDRED_K_CONTEXT = 200_000;
 const ONE_M_CONTEXT = 1_000_000;
@@ -97,7 +97,7 @@ const PLAN_GATED_ONE_M: Record<string, (settings: LongContextSettings) => boolea
 };
 
 export function resolveClaudeCodeRuntimeModel(
-	model: { id: string; contextWindow?: number | null },
+	model: { id: string },
 	settings: LongContextSettings,
 ): ClaudeCodeRuntimeModel {
 	const modelId = model.id;
@@ -119,7 +119,7 @@ export function resolveClaudeCodeRuntimeModel(
 	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 }
 
-export function claudeCodeModelId(model: { id: string; contextWindow?: number | null }, settings: LongContextSettings): string {
+export function claudeCodeModelId(model: { id: string }, settings: LongContextSettings): string {
 	return resolveClaudeCodeRuntimeModel(model, settings).cliModelId;
 }
 

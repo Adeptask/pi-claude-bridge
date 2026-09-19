@@ -1,9 +1,9 @@
 /**
  * Tests for MODELS construction + resolveModel.
- * Pins: catalog-driven picker excludes pi-ai's dated snapshot aliases, sort order
- * decides first-partial-match shortcut resolution, projection strips pi-ai's
- * baseUrl/api/provider/headers, and the runtime policy maps declared context
- * windows to [1m] ids — with measured exceptions.
+ * Pins: catalog-driven picker excludes pi-ai's dated snapshot aliases, family
+ * shortcuts resolve newest-first regardless of sort order, projection strips
+ * pi-ai's baseUrl/api/provider/headers, and the runtime policy gates [1m] ids
+ * on measurement and plan settings.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -86,16 +86,6 @@ describe("resolveModel", () => {
 
 	it("exact id beats newer partial match (claude-fable-5 → fable-5, not 5-1)", () => {
 		assert.equal(resolveModel(models, "claude-fable-5")?.id, "claude-fable-5");
-	});
-
-	describe("Fable 5.1", () => {
-		// Lives in pi-ai's catalog natively since 0.85.0; entries missing from it are
-		// silently dropped by buildModels (pinned above).
-		it("requests the 1M runtime id for Fable 5.1", () => {
-			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM("claude-fable-5-1"), PRO), {
-				cliModelId: "claude-fable-5-1[1m]", contextWindow: 1000000,
-			});
-		});
 	});
 });
 

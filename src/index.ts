@@ -134,11 +134,9 @@ function diagDump(label: string, data: Record<string, unknown>) {
 
 // --- Constants ---
 
-// Global key to prevent re-registration of the provider across module reloads.
-//
-// Extensions like pi-subagents spawn a subagent and it loads this module
-// On session_shutdown (including /reload), clearSession() resets this so a fresh
-// registration can occur for the next session.
+// Marks which bridge module instance owns the registered provider's stream fn.
+// Full registration policy (first vs later instances, shared vs own registry):
+// see the "--- Provider ---" block in activate() below.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
 // Claude Code's own builtin tools, for the AskClaude path where CC really runs
@@ -438,7 +436,7 @@ function resultErrorText(message: SDKMessage): string | undefined {
  *  failure and refuses to retry. */
 function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?: number }, failure: string): string {
 	const kind = rejection.rateLimitType ? ` (${rejection.rateLimitType})` : "";
-	const resets = rejection.resetsAt ? ` — resets ${new Date(rejection.resetsAt * 1000).toLocaleTimeString()}` : "";
+	const resets = rejection.resetsAt ? ` — resets ${new Date(rejection.resetsAt * 1000).toLocaleTimeString()}` : ""; // resetsAt: Unix seconds (unit undocumented in the SDK; observed)
 	return `Claude rate limit${kind}${resets}: ${failure}`;
 }
 
