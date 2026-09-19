@@ -155,6 +155,14 @@ export class PromptCaptures {
 			return revived;
 		}
 
+		// Inheritance must be tried before any tolerance/adoption route. A sub-agent
+		// child that embeds its parent's prompt verbatim contains every portable part
+		// of the parent's capture, so an "adopt the capture whose portable parts all
+		// appear here" heuristic (as drafted in upstream PR #76's findPortableMatch)
+		// placed above this route would match first, re-key the PARENT's capture under
+		// the child's prompt, and silently drop the child's wrapper text — exactly the
+		// instruction loss the throw exists to prevent. If such a route is ever added,
+		// it belongs below this block.
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
 		if (embedded.length === 0) {
 			const matches = this.closestKnown(systemPrompt);
