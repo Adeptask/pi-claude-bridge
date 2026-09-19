@@ -1560,8 +1560,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// replaces that exact inherited prompt with its already-safe portable parts.
 	// TODO(pi post-0.85.1): the section-based prompt on pi main hands providers a transcript
 	// with no systemPrompt field — the prompt lives in the leading system messages
-	// (getCurrentSystemPrompt(context.messages)). When that ships, derive the key here;
-	// context.systemPrompt will be undefined and resolve to nothing (silent, not a throw).
+	// (getCurrentSystemPrompt(context.messages)). When that ships, derive the key there —
+	// NOT from the recorded keys: under a forced prompt the transcript head is projected
+	// via transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
+	// Until then context.systemPrompt will be undefined and resolve to nothing (silent,
+	// not a throw).
 	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
 	const systemPromptAppend = promptCapture
 		? projectPromptCapture(promptCapture, {
@@ -2096,9 +2099,10 @@ export default function (pi: ExtensionAPI) {
 		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
 
-	// Mid-run re-renders: turn_start fires before every turn after the first, after
-	// prepareNextTurnWithContext re-rendered the options (pi's section-based prompt) and
-	// after any mid-run setActiveToolsByName rebuild (0.85.1). Re-keying at each boundary
+	// Mid-run re-renders: turn_start fires before every turn (first turn included, both
+	// architectures) after the turn's prompt is final: prepareNextTurnWithContext has
+	// re-rendered the options (pi's section-based prompt) and any mid-run
+	// setActiveToolsByName rebuild (0.85.1) already landed. Re-keying at each boundary
 	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
 	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
 	// next before_agent_start — accepted: a stale skills list beats failing the turn.

@@ -15,10 +15,10 @@
  * 2. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
  *    pi-web-ui shape) is neither a rendered-options key, a handler-returned force
  *    (which agent_start does capture — see the force test below), nor an embedding.
- * 3. A prompt that changes mid-run (issue #91's multi-turn shape): agent_start fires
- *    once per run, not per turn, so a later turn's re-rendered prompt is unrecorded.
- *    (The re-render path is pi's section-based prompt, post-0.85.1; on 0.85.1 a mid-run
- *    setActiveToolsByName change has the same effect.)
+ * 3. A prompt that changes AFTER turn_start (issue #91's remaining shape): turn_start
+ *    re-keys every turn (first included), but a prompt rewritten between turn_start and
+ *    the stream call — an extension context-event handler or a forced-prompt projection
+ *    on newer pi — is seen by no boundary.
  */
 
 import { describe, it } from "node:test";
@@ -101,18 +101,20 @@ describe("agent_start capture — documented gaps", () => {
 		);
 	});
 
-	it("does not re-record a prompt that widens again mid-run (#91 multi-turn shape)", () => {
+	it("does not see a prompt replaced between turn_start and the stream call (#91 remaining shape)", () => {
 		const handlers = activateWithMockPi();
 		handlers.get("before_agent_start")({ systemPrompt: "turn-1 prompt", systemPromptOptions: {} });
 		handlers.get("agent_start")({}, { getSystemPrompt: () => "turn-1 prompt" });
+		handlers.get("turn_start")({}, { getSystemPrompt: () => "turn-2 rendered prompt" });
+		assert.ok(__test.promptCaptures.resolveOrDerive("turn-2 rendered prompt"), "the turn_start record resolves");
 
-		// agent_start fires once per agent run. If MCP snippets merge before a later
-		// in-run turn (prepareNextTurnWithContext), the turn-2 render is a new prompt
-		// nothing recorded.
+		// A rewrite landing after turn_start — a context-event handler replacing the
+		// system message, or a forced-prompt projection on newer pi — is seen by no
+		// recording boundary. When it neither is nor embeds a known key, it throws.
 		assert.throws(
-			() => __test.promptCaptures.resolveOrDerive("turn-2 prompt with an MCP tool description merged in"),
+			() => __test.promptCaptures.resolveOrDerive("replacement head installed by a context handler"),
 			/no capture/,
-			"mid-run re-assembly is not captured by a run-scoped agent_start record",
+			"post-turn_start rewrites are seen by no recording boundary",
 		);
 	});
 });
