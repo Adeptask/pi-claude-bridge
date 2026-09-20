@@ -26,6 +26,7 @@ import {
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+import { nonSystemMessages, toBridgeContext } from "./transcript.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -452,6 +453,11 @@ async function runIsolatedSummary(
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
+	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
+	// prompt folded into a leading system message ahead of the lone user message (issue #106).
+	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
+	// prompt still reaches CC as its systemPrompt.
+	context = toBridgeContext(context);
 	let sdkQuery: ReturnType<typeof query> | undefined;
 	let wasAborted = false;
 	const onAbort = () => {
@@ -461,7 +467,15 @@ async function runIsolatedSummary(
 	};
 
 	try {
-		const promptText = extractIsolatedSummaryPrompt(context.messages);
+		// One-off summarizer calls (compaction, branch summary, turn prefix, bug report —
+		// anything routed through pi's completeSummarization) are marked cacheRetention:
+		// "none". Any of them may appear in a future pi release without a bridge change,
+		// so route on the marker, not on which summarizer is calling. Non-summarizer calls
+		// must still match the [system,user] compaction shape exactly.
+		const isOneOffSummary = options?.cacheRetention === "none";
+		const promptText = isOneOffSummary
+			? extractUserPrompt(context.messages)
+			: extractIsolatedSummaryPrompt(context.messages);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
@@ -644,7 +658,11 @@ function syncSharedSession(
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 ): SyncResult {
-	const priorMessages = messages.slice(0, turnStart(messages)); // everything before the current user turn
+	// System messages are pi 0.86's transcript representation of prompt and tool state, not
+	// conversation history — they are never imported into a CC session, so exclude them from
+	// the history space (priorMessages, cursor, missed) everywhere below (issue #106).
+	const history = nonSystemMessages(messages);
+	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
 
 	// REUSE path
 	//
@@ -688,7 +706,7 @@ function syncSharedSession(
 
 	// REBUILD path
 	if (priorMessages.length === 0) {
-		debug(`Case 1: clean start, ${messages.length} total messages`);
+		debug(`Case 1: clean start, ${history.length} total messages`);
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };
 	}
@@ -744,6 +762,7 @@ export const __test = {
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
 	},
+	toBridgeContext,
 	syncSharedSession,
 	extractUserPromptBlocks,
 	consumeQuery,
@@ -1472,6 +1491,10 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
+	// pi 0.86 hands providers a transcript (prompt/tools folded into system messages) —
+	// translate to the 0.85-shaped Context every cursor write, syncSharedSession call and
+	// prompt-capture lookup below assumes (issue #106). A 0.85 host passes through unchanged.
+	context = toBridgeContext(context);
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1547,13 +1570,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
 	// replaces that exact inherited prompt with its already-safe portable parts.
-	// TODO(pi post-0.85.1): the section-based prompt on pi main hands providers a transcript
-	// with no systemPrompt field — the prompt lives in the leading system messages
-	// (getCurrentSystemPrompt(context.messages)). When that ships, derive the key there —
-	// NOT from the recorded keys: under a forced prompt the transcript head is projected
-	// via transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
-	// Until then context.systemPrompt will be undefined and resolve to nothing (silent,
-	// not a throw).
+	// Derive the key from the transcript replay (toBridgeContext), NOT from the
+	// recorded keys: under a forced prompt the transcript head is projected via
+	// transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
 	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
 	const systemPromptAppend = promptCapture
 		? projectPromptCapture(promptCapture, {

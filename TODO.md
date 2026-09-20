@@ -127,6 +127,19 @@ No repro, so there is nothing to write yet. Re-run the scanners with
 
 ## Features
 
+- **Require pi >= 0.86** (drop the 0.85 dual-version shim). The #106 fix
+  (`src/transcript.ts`) vendors ~50 lines of replay logic that duplicates
+  pi-ai 0.86's `getCurrentSystemPrompt` / `getCurrentTools` to stay compatible
+  with 0.85. Requiring 0.86 lets `toBridgeContext` call the real helpers
+  (~30-line module, real `SystemMessage` types instead of the `Roled` cast).
+  Code savings are modest; the real win is test fidelity — the devDep would
+  move to 0.86, so the integration suite exercises the actual transcript
+  path instead of only synthetic unit tests. Requires checking
+  `pi-coding-agent` 0.86 extension-API compat before bumping.
+  Status: devDeps bumped to ^0.86.1 and int suites run against a real 0.86.1
+  host (peer floor stays >=0.85.0). Remaining: drop the vendored replay for
+  pi's helpers and bump the peer floor, once 0.86 has soaked.
+
 - **Markdown rendering** in expanded tool result view. Currently plain text.
   Use `Markdown` from `@earendil-works/pi-tui` with a `MarkdownTheme`.
 
