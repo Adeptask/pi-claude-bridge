@@ -426,7 +426,7 @@ function resultErrorText(message: SDKMessage): string | undefined {
  *
  *  pi has no typed rate-limit error — `stopReason` is only ever `"error"` and the sole carrier
  *  is `errorMessage` — so everything that reacts to a rate limit pattern-matches that string:
- *  pi-subagents gates `fallbackModels` on a 35-pattern list, and key-rotating extensions use
+ *  pi-subagents gates `fallbackModels` on its own pattern list, and key-rotating extensions use
  *  their own. Claude Code words a subscription limit as "You're out of extra usage · resets
  *  6:30pm", which matches none of them, so an exhausted quota reads as a fatal error and the
  *  fallback chain never runs (issue #58).
