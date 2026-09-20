@@ -476,6 +476,7 @@ async function runIsolatedSummary(
 		const promptText = isOneOffSummary
 			? extractUserPrompt(context.messages)
 			: extractIsolatedSummaryPrompt(context.messages);
+		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
@@ -1495,6 +1496,18 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// translate to the 0.85-shaped Context every cursor write, syncSharedSession call and
 	// prompt-capture lookup below assumes (issue #106). A 0.85 host passes through unchanged.
 	context = toBridgeContext(context);
+
+	// One-off summarizer calls arrive HERE too, not only via isolatedStreamFn: /bug report
+	// (summarizeForBugReport) routes through agent.streamFunction -> streamSimple, with no
+	// takeover hook. pi marks every one-off summarizer with cacheRetention:"none" in
+	// completeSummarization, so route on the marker: their prompt is never recorded by the
+	// capture boundaries and resolveOrDerive would throw. Hand them to the isolated path
+	// (separate persistSession:false CC process, no session sync needed).
+	if (options?.cacheRetention === "none") {
+		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
+		return isolatedStreamFn(model, context, options);
+	}
+
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering

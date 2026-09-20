@@ -39,7 +39,7 @@ const PI_DIST = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding
 const HANDLED = {
 	"agent-session.js": { mentions: 2, why: "hand-offs: branch summary into generateBranchSummary, /bug into generateBugReportSummary — both via agent.streamFunction" },
 	"sdk.js": { mentions: 2, why: "constructs the agent, does not summarize" },
-	"bug-report.js": { mentions: 1, why: "/bug summarization via completeSummarization (cacheRetention: none) — handled by the one-off-summary branch in runIsolatedSummary" },
+	"bug-report.js": { mentions: 1, why: "/bug summarization via completeSummarization (cacheRetention: none) — routed to the isolated path from streamClaudeAgentSdk (no takeover hook, unlike compaction)" },
 	"compaction/compaction.js": { mentions: 13, why: "taken over via session_before_compact -> isolatedStreamFn" },
 	"compaction/branch-summarization.js": { mentions: 2, why: "taken over via session_before_tree -> isolatedStreamFn" },
 };
