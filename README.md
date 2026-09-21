@@ -21,9 +21,11 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:pi-claude-bridge
 ```
 
+Requires pi 0.85.0 or newer (`pi-ai`, `pi-coding-agent`, `pi-tui`); pi 0.86 needs bridge 0.8.0 or newer. With an older pi-ai the model picker comes up empty, and the bridge logs which dependency to update.
+
 ## Provider
 
-Use `/model` to select `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-fable-5`, `claude-bridge/claude-opus-5`, `claude-bridge/claude-opus-4-8`, `claude-bridge/claude-opus-4-7`, `claude-bridge/claude-opus-4-6`, `claude-bridge/claude-sonnet-5`, `claude-bridge/claude-sonnet-4-6`, or `claude-bridge/claude-haiku-4-5`.
+Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
 
 Behind the scenes, pi's tools are bridged to Claude Code but it should all work like normal in pi. Bash commands get a 120-second default timeout (matching Claude Code's default) since pi's bash has no timeout by default. Skills in pi are copied over to Claude Code's system prompt so should work as they would with any other pi provider. Steering works mid-turn: a message sent while Claude is running a tool reaches it at that tool boundary, not after the whole turn finishes.
 
@@ -40,6 +42,8 @@ Opt-in: set `askClaude.enabled` to `true` (see [Configuration](#configuration)).
 - "Ask claude to review the plan in @foo.md, implement it, then ask an isolated=true claude to review the implementation"
 - "Ask claude to poke holes in this theory"
 - "Find all the places in the codebase that handle auth"
+
+Delegated calls are isolated from your `~/.claude` estate: children don't read global `CLAUDE.md` files or Claude Code's skill listing, and always get Claude Code's own system prompt preset.
 
 You could also create skills or add something to AGENTS.md to e.g. "Always call Ask Claude to review complicated feature implementations before considering the task complete."
 
@@ -93,7 +97,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 
 **Startup notice:** the first interactive session to reach Claude Code lists whichever of `provider.plan` and `askClaude.enabled` you have left unset, then records `startupNoticeShown` (the date, `YYYY-MM-DD`) in the global config so it doesn't nag again.
 
-**Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly.
+**Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
 ## Tests
 
@@ -117,3 +121,7 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 **Sessions get rebuilt more often than they need to be, and a rebuild is expensive.** The bridge rewrites Claude Code's session from pi's history whenever pi's messages move underneath it — after an abort, `/compact`, tree navigation, or an API error. Measured over this repo's own bridge log, a rebuild boundary loses the prompt cache roughly 58% of the time against 26% for a plain resume, so an abort-heavy session costs noticeably more than a clean one. Aborts alone are 46% of rebuilds.
 
 **Files Claude Code edits are not carried across a rebuild.** CC records the post-edit contents as an `edited_text_file` attachment; those aren't carried, because they hang off a tool-result record rather than a prompt and so have no stable position to restore them to. The edit itself survives — it's in the history as a tool call and its result — so this costs Claude the file snapshot, not the knowledge that it made the change. `@file` expansions *are* carried.
+
+**On pi 0.86 with bridge 0.7.0 or older, every new session fails.** The symptoms are `WARNING session verify: file missing after save` and then `No conversation found with session ID` on the next turn: pi 0.86 moved the system prompt and tool set into `role:"system"` transcript messages, which the older bridge read as a one-message history. Upgrade the bridge rather than downgrading pi — on 0.86 the old bridge also serves no tools, so a turn that does go through looks normal while the model writes tool calls out as prose instead of calling anything.
+
+**Exported Anthropic environment variables override the Claude Code child (issue #107).** The bridge passes the ambient environment through, so an `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` exported for another gateway (a corporate proxy, LiteLLM) redirects Claude Code as well, and every turn fails with that gateway's auth error. Unset them for the pi process.
