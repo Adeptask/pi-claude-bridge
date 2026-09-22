@@ -9,9 +9,11 @@
  * that still fall outside it:
  *
  * 1. Tail-stripped inheritance (issue #88): a child embedding its parent prompt minus
- *    pi's per-session tail (skills catalogue, cwd footer) matches no full-prompt key.
- *    (gotgenes/pi-subagents strips the tail; elidickinson/pi-subagents embeds verbatim
- *    and is covered by the agent_start record.)
+ *    pi's per-session tail (skills catalogue, cwd footer) matches no full-prompt key, so
+ *    nothing is projected for that child. The shape remains unsupported, but the
+ *    sendability guard fails with its diagnostic instead of silently forwarding pi's
+ *    harness. (gotgenes/pi-subagents strips the tail; elidickinson/pi-subagents embeds
+ *    verbatim and is covered by the agent_start record.)
  * 2. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
  *    pi-web-ui shape) is neither a rendered-options key, a handler-returned force
  *    (which agent_start does capture — see the force test below), nor an embedding.
@@ -23,6 +25,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { PI_PREAMBLE, projectPromptCapture } from "../src/prompt-capture.js";
 
 const { default: activate, __test } = await import("../src/index.js");
 
@@ -35,6 +38,21 @@ function activateWithMockPi(activateFn) {
 	});
 	return handlers;
 }
+
+const section = (name, content) => `<${name}>\n${content}\n</${name}>`;
+const parentSections = [
+	`${PI_PREAMBLE}, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.`,
+	section("tools", "- read: Read a file\n- bash: Run commands\n\nIn addition to the tools above, you may have access to other custom tools depending on the project."),
+	section("rules", "- Use bash for file operations like ls, rg, find\n- Be concise in your responses"),
+	section("docs", "Pi documentation (read only when the user asks about pi itself):\n- Main documentation: /pi/README.md"),
+	section("project_context", "Project-specific instructions and guidelines:\n\n<project_instructions path=\"/parent/AGENTS.md\">\nParent rules.\n</project_instructions>"),
+	section("skills", "The following skills provide specialized instructions for specific tasks.\n\n<available_skills>\n  <skill>\n    <name>deploy</name>\n    <description>Deploy the application.</description>\n  </skill>\n</available_skills>"),
+	section("cwd", "/parent"),
+];
+const PARENT_PROMPT = parentSections.join("\n\n");
+const STRIPPED_PARENT = parentSections.slice(0, 5).join("\n\n");
+const CHILD_WRAPPER = `<active_agent name=\"Explore\"/>\n\n# Environment\nWorking directory: /child\nGit repository: yes\nBranch: main\nPlatform: darwin`;
+const STRIPPED_CHILD = `${STRIPPED_PARENT}\n\n${CHILD_WRAPPER}`;
 
 describe("agent_start capture — documented gaps", () => {
 	it("makes isolated subagent captures resolve via the shared registry (#64)", async () => {
@@ -58,17 +76,37 @@ describe("agent_start capture — documented gaps", () => {
 
 	it("does not match a child embedding a tail-stripped parent prompt (#88)", () => {
 		const handlers = activateWithMockPi();
-		const parentTail = "\n\nThe following skills provide specialized instructions.\n<available_skills>...</available_skills>\n\nCurrent working directory: /parent";
-		const parent = "You are pi.\n# Tools\n- read: Read a file" + parentTail;
-		handlers.get("before_agent_start")({ systemPrompt: parent, systemPromptOptions: {} });
-		handlers.get("agent_start")({}, { getSystemPrompt: () => parent });
+		handlers.get("before_agent_start")({ systemPrompt: PARENT_PROMPT, systemPromptOptions: {} });
+		handlers.get("agent_start")({}, { getSystemPrompt: () => PARENT_PROMPT });
 
 		// gotgenes/pi-subagents inheritedIdentity embeds the parent minus the per-session tail.
-		const strippedChild = `You are pi.\n# Tools\n- read: Read a file\n\n<sub_agent_context>child rules</sub_agent_context>`;
 		assert.throws(
-			() => __test.promptCaptures.resolveOrDerive(strippedChild),
+			() => __test.promptCaptures.resolveOrDerive(STRIPPED_CHILD),
 			/no capture/,
 			"the full assembled prompt is not a substring of its tail-stripped embedding",
+		);
+	});
+
+	it("fails loudly when a recorded tail-stripped child has no inheritance edge (#88)", () => {
+		const handlers = activateWithMockPi();
+		handlers.get("before_agent_start")({ systemPrompt: PARENT_PROMPT, systemPromptOptions: {} });
+		handlers.get("agent_start")({}, { getSystemPrompt: () => PARENT_PROMPT });
+
+		// The child is recorded at both production capture boundaries, but its custom
+		// prompt contains only the tail-stripped parent shape, so no edge is matched.
+		handlers.get("before_agent_start")({
+			systemPrompt: STRIPPED_CHILD,
+			systemPromptOptions: { customPrompt: STRIPPED_CHILD },
+		});
+		handlers.get("agent_start")({}, { getSystemPrompt: () => STRIPPED_CHILD });
+
+		const capture = __test.promptCaptures.resolve(STRIPPED_CHILD);
+		assert.ok(capture, "the tail-stripped child must be recorded before projection");
+		assert.equal(capture.inherited.length, 0, "the unsupported embedding must not invent an inheritance edge");
+		assert.throws(
+			() => projectPromptCapture(capture, { skillReadTool: "none" }),
+			/prompt-capture: refusing to send this prompt/,
+			"an unmatched recorded child must fail before its harness reaches Claude Code",
 		);
 	});
 

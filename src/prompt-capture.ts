@@ -244,6 +244,19 @@ export class PromptCaptures {
 	}
 }
 
+/** Pi's own preamble, the first section of every prompt pi renders for a session
+ *  without a custom prompt. Machine-generated, so operator text never carries it;
+ *  forwarding it makes Claude Code's subscription path read the request as a
+ *  third-party app. */
+export const PI_PREAMBLE = "You are an expert coding assistant operating inside pi";
+
+/** Both doc paths from pi's documentation-routing line. Anthropic's subscription gate
+ *  rejects a system prompt carrying both, while either alone passes (issues #883, #88). */
+const ANTHROPIC_THIRD_PARTY_TRIGGERS = ["docs/custom-provider.md", "docs/packages.md"];
+
+/** One piece of the append, named so a refusal can say where it found the text. */
+type PromptPart = { label: string; text: string };
+
 const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
 
 /** Isolated agents re-evaluate this module; a process-wide instance lets the pinned
@@ -308,16 +321,52 @@ function projectCapture(
 		});
 
 		const custom = projectCustom(capture, options, visiting);
-		const parts = [
-			formatProjectContext(capture.contextFiles),
-			renderSkillsBlock(ownSkills, options.skillReadTool),
-			custom,
-			capture.append,
-		].filter((part): part is string => Boolean(part));
-		return parts.length > 0 ? parts.join("\n\n") : undefined;
+		const parts: PromptPart[] = [];
+		const context = formatProjectContext(capture.contextFiles);
+		if (context) parts.push({ label: "the project context block", text: context });
+		const skills = renderSkillsBlock(ownSkills, options.skillReadTool);
+		if (skills) parts.push({ label: "the skills block", text: skills });
+		if (custom) parts.push({ label: "the custom prompt", text: custom });
+		if (capture.append) parts.push({ label: "the appended instructions", text: capture.append });
+		assertSendablePrompt(parts, capture);
+		return parts.length > 0 ? parts.map((part) => part.text).join("\n\n") : undefined;
 	} finally {
 		visiting.delete(capture);
 	}
+}
+
+function assertSendablePrompt(parts: readonly PromptPart[], capture: PromptCapture): void {
+	const findings: string[] = [];
+	for (const { label, text } of parts) {
+		const offset = preambleAtLineStart(text);
+		if (offset !== -1) {
+			findings.push(`pi's preamble ("${PI_PREAMBLE}") in ${label}, at offset ${offset} of ${text.length} chars`);
+		}
+		if (ANTHROPIC_THIRD_PARTY_TRIGGERS.every((trigger) => text.includes(trigger))) {
+			findings.push(`${ANTHROPIC_THIRD_PARTY_TRIGGERS.join(" and ")} in ${label}`);
+		}
+	}
+	if (findings.length === 0) return;
+
+	throw new Error([
+		"prompt-capture: refusing to send this prompt. Claude Code's Anthropic path reads a request",
+		"  carrying pi's harness, or the phrase pair its subscription gate rejects, as a third-party",
+		"  app: it fails with 400 or is billed as extra usage.",
+		...findings.map((finding) => `  Found: ${finding}.`),
+		`  Capture: ${capture.source ?? "unknown"}, ${capture.inherited.length} inherited capture(s) substituted.`,
+		"  If this came from an inherited pi prompt, see README \"Compatibility with other extensions\".",
+		"  If it is your own text, reword or remove it. CLAUDE_BRIDGE_DEBUG=1 writes the full prompt to",
+		"  ~/.pi/agent/claude-bridge.log.",
+	].join("\n"));
+}
+
+/** Offset of pi's preamble at the start of a line, or -1. Mid-line mentions are someone
+ *  describing pi's prompt, not pi's prompt. */
+function preambleAtLineStart(text: string): number {
+	for (let offset = text.indexOf(PI_PREAMBLE); offset !== -1; offset = text.indexOf(PI_PREAMBLE, offset + PI_PREAMBLE.length)) {
+		if (offset === 0 || text[offset - 1] === "\n") return offset;
+	}
+	return -1;
 }
 
 function projectCustom(
