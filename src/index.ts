@@ -1640,9 +1640,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
 	// Prefer the model's own thinkingLevelMap when present (per-model overrides —
-	// e.g. opus-4.7 wants xhigh→xhigh, not xhigh→max); pi's built-in catalog ships
-	// no maps today, so the generic table below is the mapping for every model
-	// unless a models.json entry adds one. Map values are provider-generic strings, so the
+	// e.g. a map could route xhigh→xhigh where the generic table maps xhigh→max);
+	// pi's built-in catalog ships no maps today, so the table below is the mapping
+	// for every model unless a models.json entry adds one. Map values are provider-generic strings, so the
 	// cast to EffortLevel assumes the model catalog keeps them CC-compatible.
 	const effort = options?.reasoning
 		? (model.thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)

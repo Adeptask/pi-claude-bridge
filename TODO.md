@@ -127,6 +127,7 @@ No repro, so there is nothing to write yet. Re-run the scanners with
 
 ## Features
 
+- **Markdown rendering** in expanded tool result view. Currently plain text.
   Use `Markdown` from `@earendil-works/pi-tui` with a `MarkdownTheme`.
 
 - **`/claude config` slash command** for runtime configuration. Currently

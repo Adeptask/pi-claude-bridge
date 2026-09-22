@@ -557,14 +557,13 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 		// resume): a resumed conversation echoes msg[0] from session start, while
 		// the bridge's rebuild path re-invokes fresh and recomputes it — the shape
 		// where the break lives.
-		const ctrl = await collect(query({ prompt: "Reply OK.", options: opts({}) }));
+		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
 		const ctrlFirst = requests.at(-1);
 		assert.ok(JSON.stringify(ctrlFirst).includes("gitStatus"),
 			"the preset no longer carries a gitStatus block — this test's negative side is obsolete");
 		writeFileSync(join(repo, "ctrl-new.txt"), "x\n");
 		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
 		const [c1, c2] = [presetReqs().at(-2), presetReqs().at(-1)];
-		void ctrl; void ctrlFirst;
 		assert.ok(JSON.stringify(c1.messages[0]).includes("gitStatus") && JSON.stringify(c2.messages[0]).includes("gitStatus"),
 			"git snapshot no longer rides in the leading user message — re-point this control");
 		assert.notDeepEqual(sansCacheControl(c1.messages[0]), sansCacheControl(c2.messages[0]),

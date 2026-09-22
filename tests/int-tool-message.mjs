@@ -171,7 +171,7 @@ describe("tool-message integration", () => {
 		// sees activeQuery=true, enters tool-result-delivery mode, extracts the tool
 		// result, but silently ignores the trailing user message (the steer). Claude
 		// never sees the steer content.
-		const collector = collectText();
+		const mark = logMark();
 		await send({
 			type: "prompt",
 			message: "Call SlowTool with seconds=2. After it returns, repeat exactly what it returned.",
@@ -183,8 +183,16 @@ describe("tool-message integration", () => {
 			streamingBehavior: "steer",
 		});
 		await waitForEvent("agent_end");
-		const text = collector.stop();
-		assert.match(text.toLowerCase(), /mango/, `Steer content not visible to assistant: ${text.slice(0, 300)}`);
+		// Structural assert: the steer must reach CC's session. The bug this pins
+		// dropped the trailing user message during tool-result delivery, so Claude
+		// never saw the steer. Model echo is not assertable on CC 2.1.280: the steer
+		// arrives as a <system-reminder> inside the tool_result content, and CC's
+		// own prompt-injection guidance tells the model to distrust that (verbatim
+		// refusal observed, and the echo assert flakes as a result).
+		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
+		assert.ok(records.some((r) => JSON.stringify(r.attachment ?? "").includes("MANGO")
+				|| JSON.stringify(r.message?.content ?? "").includes("MANGO")),
+			"steer during tool execution never reached CC's session — dropped at delivery");
 	});
 
 	it("steer is drained at the tool boundary, mid-turn", { timeout: 90_000 }, async () => {
