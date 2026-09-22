@@ -21,7 +21,7 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:pi-claude-bridge
 ```
 
-Requires pi 0.85.0 or newer (`pi-ai`, `pi-coding-agent`, `pi-tui`); pi 0.86 needs bridge 0.8.0 or newer. With an older pi-ai the model picker comes up empty, and the bridge logs which dependency to update.
+Requires pi 0.86.1 or newer (`pi-ai`, `pi-coding-agent`, `pi-tui`). With an older pi-ai the model picker comes up empty, and the bridge logs which dependency to update.
 
 ## Provider
 

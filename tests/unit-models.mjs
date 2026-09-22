@@ -80,8 +80,16 @@ describe("MODELS projection", () => {
 describe("resolveModel", () => {
 	const models = buildModels(getModels("anthropic"));
 
-	it("opus shortcut resolves to claude-opus-5 (newest opus)", () => {
-		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
+	it("opus shortcut resolves to the newest opus in the catalog", () => {
+		// buildModels sorts newest-first within a family and resolveModel's partial
+		// tiebreak ranks by the same version, so a new Anthropic release (pi-ai 0.87.1
+		// added claude-opus-5-5) keeps both green without edits here.
+		const newestOpus = models.find((m) => m.id.includes("opus"));
+		assert.ok(newestOpus, "catalog contains an opus model");
+		assert.equal(resolveModel(models, "opus")?.id, newestOpus.id);
+		// Order independence: reversed input puts the oldest opus first, so a resolver
+		// that settled for the first partial match would fail here.
+		assert.equal(resolveModel([...models].reverse(), "opus")?.id, newestOpus.id);
 	});
 
 	it("exact id beats newer partial match (claude-fable-5 → fable-5, not 5-1)", () => {

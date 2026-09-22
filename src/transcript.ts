@@ -9,9 +9,10 @@
  * the stream entry points — session bookkeeping, cursor counts, prompt capture, MCP tool
  * resolution, prompt extraction — assumes the 0.85 shape, so reconstruct it once here.
  *
- * Same algorithm as pi-ai 0.86's `getCurrentSystemPrompt` / `getCurrentTools`
- * (packages/ai/src/utils/transcript.ts), vendored because the bridge's declared pi-ai range
- * starts at 0.85 where neither exists.
+ * Same algorithm as pi-ai's `getCurrentSystemPrompt` / `getCurrentTools`
+ * (packages/ai/src/utils/transcript.ts). The real helpers are importable from
+ * `@earendil-works/pi-ai/utils/transcript` at the bridge's >=0.86.1 floor;
+ * swapping them in is tracked in TODO.md.
  */
 import type { Context, Tool } from "@earendil-works/pi-ai";
 

@@ -136,9 +136,11 @@ No repro, so there is nothing to write yet. Re-run the scanners with
   move to 0.86, so the integration suite exercises the actual transcript
   path instead of only synthetic unit tests. Requires checking
   `pi-coding-agent` 0.86 extension-API compat before bumping.
-  Status: devDeps bumped to ^0.86.1 and int suites run against a real 0.86.1
-  host (peer floor stays >=0.85.0). Remaining: drop the vendored replay for
-  pi's helpers and bump the peer floor, once 0.86 has soaked.
+  Status: peer floor >=0.86.1 and devDeps ^0.87.1; unit suite and typecheck
+  pass on a real 0.87.1 devDep tree, int suites verified on 0.86.1 hosts only.
+  The replay helpers are present at the floor (pi-ai 0.86.1), so the swap is
+  unblocked: check `pi-coding-agent` 0.87 compat on a live host, then drop the
+  vendored replay for pi's helpers.
 
 - **Markdown rendering** in expanded tool result view. Currently plain text.
   Use `Markdown` from `@earendil-works/pi-tui` with a `MarkdownTheme`.
