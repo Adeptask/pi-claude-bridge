@@ -116,6 +116,18 @@ Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 
 When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the `syncResult:` lines from the bridge log plus the matching `cc-cli-logs/` file for the failing query.
 
+## Compatibility with other extensions
+
+Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (`docs/custom-provider.md` in the same prompt with `docs/packages.md`), the bridge stops the turn instead of sending it. Otherwise Anthropic may try to bill these requests as Extra Usage. The stop repeats on every later turn in that session, since the same prompt is captured again, so fix the source before retrying. If you run into issues, `CLAUDE_BRIDGE_DEBUG=1` writes the full prompt to `~/.pi/agent/claude-bridge.log` when that happens.
+
+### Using claude bridge with @gotgenes/pi-subagents
+
+Requires the following in `~/.pi/agent/subagents.json`:
+
+```json
+{"promptInheritance": {"claude-bridge": "portable"}}
+```
+
 ## Known issues
 
 **Sessions get rebuilt more often than they need to be, and a rebuild is expensive.** The bridge rewrites Claude Code's session from pi's history whenever pi's messages move underneath it — after an abort, `/compact`, tree navigation, or an API error. Measured over this repo's own bridge log, a rebuild boundary loses the prompt cache roughly 58% of the time against 26% for a plain resume, so an abort-heavy session costs noticeably more than a clean one. Aborts alone are 46% of rebuilds.
