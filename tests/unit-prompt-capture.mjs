@@ -114,6 +114,24 @@ describe("PromptCaptures", () => {
 		assert.equal(captures.resolveOrDerive(undefined), undefined);
 	});
 
+	it("reports the closest known capture when a prompt matches nothing", () => {
+		const diagnostics = [];
+		const captures = new PromptCaptures(64, (d) => diagnostics.push(d));
+		captures.record("prefix-common-THE-REST", capture());
+
+		let error;
+		try {
+			captures.resolveOrDerive("prefix-common-WHO-ARE-YOU");
+		} catch (e) {
+			error = e;
+		}
+
+		assert.match(String(error?.message), /diverges at offset 14 \(22-char key\)/);
+		assert.equal(diagnostics.length, 1);
+		assert.equal(diagnostics[0].matches[0].key, "prefix-common-THE-REST");
+		assert.equal(diagnostics[0].matches[0].firstDivergent, 14);
+	});
+
 	it("recursively projects an inherited prompt without Pi's harness", () => {
 		const browser = skill("browser");
 		const captures = new PromptCaptures();
@@ -239,5 +257,27 @@ describe("PromptCaptures", () => {
 		assert.equal(captures.resolve("b"), undefined);
 		assert.equal(captures.resolve("a").custom, "refreshed");
 		assert.ok(captures.resolve("c") && captures.resolve("d"));
+	});
+});
+
+describe("capture provenance", () => {
+	it("records which boundary last wrote a key", () => {
+		const captures = new PromptCaptures();
+		captures.record("key", capture(), "agent_start");
+
+		assert.equal(captures.resolve("key").source, "agent_start");
+		captures.record("key", capture(), "turn_start");
+		assert.equal(captures.resolve("key").source, "turn_start", "a re-record replaces the earlier source");
+	});
+
+	it("names the closest match's boundary in a throw", () => {
+		const captures = new PromptCaptures();
+		captures.record("prefix-common-THE-REST", capture(), "agent_start");
+
+		assert.throws(
+			() => captures.resolveOrDerive("prefix-common-WHO-ARE-YOU"),
+			/recorded at agent_start/,
+			"the diagnostic must say which boundary last recorded the closest known prompt",
+		);
 	});
 });
