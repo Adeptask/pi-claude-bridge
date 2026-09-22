@@ -127,10 +127,6 @@ No repro, so there is nothing to write yet. Re-run the scanners with
 
 ## Features
 
-- **Validate the pi-0.86 floor end to end.** The int suites have only run
-  against 0.86.1 hosts; run them once against a live 0.87 host.
-
-- **Markdown rendering** in expanded tool result view. Currently plain text.
   Use `Markdown` from `@earendil-works/pi-tui` with a `MarkdownTheme`.
 
 - **`/claude config` slash command** for runtime configuration. Currently

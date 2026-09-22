@@ -109,6 +109,7 @@ describe("tool-message integration", () => {
 
 	it("parallel tool calls with steer delivers all results", { timeout: TEST_TIMEOUT }, async () => {
 		const collector = collectText();
+		const mark = logMark();
 		await send({
 			type: "prompt",
 			message: "Call SlowTool three times in parallel: seconds=3, seconds=4, seconds=5. Then list all three results.",
@@ -128,8 +129,15 @@ describe("tool-message integration", () => {
 		// Delivery only forwards a steer when the trailing message is a user message.
 		// Pi injects drained steers between tool results too (see extract-tool-results),
 		// and in that shape the steer would be dropped and the cursor advanced past it,
-		// so Claude never sees it. Asserting results survive does not catch that.
-		assert.match(text.toLowerCase(), /papaya/, `Steer during parallel tools not visible to assistant: ${text.slice(0, 300)}`);
+		// so Claude never sees it. Asserting results survive does not catch that, and a
+		// model-echo assert is unreliable: CC 2.1.280 delivers a drained steer as a
+		// <system-reminder> inside the tool_result content, which its own prompt-injection
+		// guidance tells the model to distrust (verbatim refusal seen on 2.1.280). Assert
+		// the transport fact instead: the steer reached CC's session at all.
+		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
+		assert.ok(records.some((r) => JSON.stringify(r.attachment ?? "").includes("PAPAYA")
+				|| JSON.stringify(r.message?.content ?? "").includes("PAPAYA")),
+			`steer never reached CC's session — dropped between the parallel tool results`);
 	});
 
 	it("steer during text response (no tool call) completes both turns", { timeout: TEST_TIMEOUT }, async () => {
@@ -194,9 +202,6 @@ describe("tool-message integration", () => {
 		// prompt with no attachment at all.
 		const mark = logMark();
 		const steerText = "STOP. Do not call SlowTool again. Reply with only the word BANANA.";
-		let toolStarts = 0;
-		const removeCounter = addListener((msg) => { if (msg.type === "tool_execution_start") toolStarts++; });
-
 		await send({
 			type: "prompt",
 			message: "Call SlowTool with seconds=1 exactly 12 times, strictly one at a time — wait for each result before starting the next. Do not call it twice in the same message.",
@@ -204,7 +209,6 @@ describe("tool-message integration", () => {
 		await waitForEvent("tool_execution_start");
 		await send({ type: "prompt", message: steerText, streamingBehavior: "steer" });
 		await waitForEvent("agent_end");
-		removeCounter();
 
 		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
 		const steerAt = records.findIndex((r) => r.attachment?.type === "queued_command"
@@ -220,8 +224,11 @@ describe("tool-message integration", () => {
 		assert.ok(records.slice(steerAt).some((r) => r.type === "assistant"),
 			"CC never responded after draining the steer");
 
-		// Corroborating, not proof: the model should abandon its 12-call loop.
-		assert.ok(toolStarts <= 6, `${toolStarts} of 12 tool calls ran before Claude acted on the steer`);
+		// Corroboration retired: CC 2.1.280 delivers a drained steer as a
+		// <system-reminder> concatenated into the tool_result content, and its own
+		// prompt-injection guidance tells the model to distrust that. Model
+		// compliance reflects CC's delivery colliding with CC's guard, not the
+		// bridge's drain behavior. The structural asserts above are the tripwire.
 	});
 
 	it("steer at a text-only boundary is not pushed into the active query", { timeout: TEST_TIMEOUT }, async () => {
