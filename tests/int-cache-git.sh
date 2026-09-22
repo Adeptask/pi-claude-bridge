@@ -80,19 +80,41 @@ $COMMIT_CMD"
 
 # The agent runs the command with no -C, in the pi/CC process cwd, so that cwd must
 # be the throwaway repo before any prompt is sent. Guard this repo anyway: a
-# `git add -A` loose in here would commit untracked work.
+# `git add -A` loose in here would commit untracked work. The guard is checked on
+# EVERY exit path (the EXIT trap), not just at run end — a host mutation must fail
+# the run and be reported even when the run itself fails first. (bash has no
+# trap-replacement API, so the child trap deletes and re-arms the parent's.)
 HOST_HEAD=$(git -C "$DIR" rev-parse HEAD)
 HOST_STATUS=$(git -C "$DIR" status --porcelain)
-guard_host_repo() {
+HOST_GUARD_TRIPPED=0
+host_guard() {
   local now_head now_status
   now_head=$(git -C "$DIR" rev-parse HEAD)
   now_status=$(git -C "$DIR" status --porcelain)
   if [ "$now_head" != "$HOST_HEAD" ] || [ "$now_status" != "$HOST_STATUS" ]; then
     echo "  FAIL: the agent mutated this repo (HEAD $HOST_HEAD -> $now_head)" >&2
-    return 1
+    HOST_GUARD_TRIPPED=1
   fi
-  return 0
 }
+guard_host_repo() {
+  host_guard
+  [ "$HOST_GUARD_TRIPPED" -eq 0 ]
+}
+# Parent EXIT trap runs FIRST (most recently armed trap fires first): report a
+# host mutation on any exit path, then do the child's cleanup.
+cleanup() {
+  kill_descendants
+  host_guard
+  if [[ "$REPO" == "$CWD_PREFIX"* && ${#REPO} -gt ${#CWD_PREFIX} && -d "$REPO" ]]; then
+    rm -rf -- "$REPO"
+  fi
+  # Binding on the success path too: kill_descendants first, then the guard, so
+  # nothing can mutate the host after the check but before this process exits.
+  if [ "$HOST_GUARD_TRIPPED" -eq 1 ]; then
+    exit 1
+  fi
+}
+trap cleanup EXIT
 
 # Cheap 1-turn dry run so a full 8-turn run is never spent on a prompt the model
 # won't follow.
@@ -112,9 +134,10 @@ cd "$REPO"
 PREFLIGHT_OK=0
 for attempt in 1 2 3; do
   echo " preflight attempt $attempt:"
-  if preflight && guard_host_repo; then
-    PREFLIGHT_OK=1
-    break
+  if preflight; then
+    guard_host_repo && PREFLIGHT_OK=1 && break
+  else
+    guard_host_repo
   fi
   echo " -> agent did not produce the commit; assistant text:"
   jq -r 'select(.type=="agent_end") | .messages[]? | select(.role=="assistant") | .content[]? | select(.type=="text") | "    " + .text' "$PREFLIGHT" 2>/dev/null | tail -6 || true
@@ -125,7 +148,11 @@ for attempt in 1 2 3; do
 done
 
 if [ "$PREFLIGHT_OK" -ne 1 ]; then
-  echo "FAIL: commit prompt never produced a real commit in preflight; full run would be invalid"
+  if [ "$HOST_GUARD_TRIPPED" -eq 1 ]; then
+    echo "FAIL: the host repo was mutated during preflight -- restore it before rerunning (see guard line above)"
+  else
+    echo "FAIL: commit prompt never produced a real commit in preflight; full run would be invalid"
+  fi
   echo "  Log: $PREFLIGHT"
   exit 1
 fi
@@ -162,6 +189,7 @@ if [ -s "$LOGFILE.err" ]; then
 fi
 
 if [ "$PI_EXIT" -ne 0 ]; then
+  guard_host_repo
   echo "FAIL: pi exited with code $PI_EXIT"
   exit 1
 fi
@@ -261,6 +289,9 @@ else
 fi
 
 guard_host_repo || REPO_OK=0
+# The final verdict goes through the guard too: a tripped guard cannot pass.
+HOST_OK=1
+guard_host_repo || HOST_OK=0
 
 TOOL_CALLS=$(jq -c 'select(.type == "tool_execution_start")' "$LOGFILE" | wc -l | tr -d ' ')
 echo "Tool calls: $TOOL_CALLS (across $TURN turns)"
@@ -343,14 +374,20 @@ fi
 # --- Summary ---
 
 echo ""
+NOTES=""
 if [ "$REPO_OK" -ne 1 ]; then
   FAIL=$((FAIL + 1))
+  NOTES="$NOTES (invalid run: transition missing)"
+fi
+if [ "$HOST_OK" -ne 1 ]; then
+  FAIL=$((FAIL + 1))
+  NOTES="$NOTES (HOST REPO WAS MUTATED)"
 fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "PASS: Prompt cache held through the git transition (commit at turn $GIT_TURN) and session resume is clean"
 else
-  echo "FAIL: $FAIL assertions failed"
+  echo "FAIL: $FAIL assertions failed$NOTES"
   echo "  Log: $LOGFILE"
   echo "  Debug: $CLAUDE_BRIDGE_DEBUG_PATH"
   exit 1

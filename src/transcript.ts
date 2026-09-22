@@ -15,7 +15,11 @@ import {
 	type SystemMessage,
 } from "@earendil-works/pi-ai";
 
-/** pi's canonical built-in section order; custom sections follow their replay position. */
+/** pi's canonical built-in section order; custom sections follow their replay position.
+ *  Known limitation, inherited from the pre-swap replay: if pi reorders existing custom
+ *  sections while patching an unrelated one, the replay diverges from getSystemPrompt()
+ *  and the exact-key capture lookup throws on that legitimate turn. Untriggered today:
+ *  pi builds custom sections in one patch per render. */
 const SECTION_RANK = new Map<string, number>([
 	["preamble", 0], ["tools", 1], ["rules", 2], ["docs", 3], ["addendum", 4],
 	["project_context", 5], ["skills", 6], ["cwd", 7],

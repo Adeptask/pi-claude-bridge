@@ -1013,6 +1013,8 @@ const REASONING_TO_EFFORT: Record<string, EffortLevel> = {
 	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
 };
 
+const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
+
 // --- Provider helpers: misc ---
 
 function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse" {
@@ -1677,11 +1679,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Prefer the model's own thinkingLevelMap when present (per-model overrides —
 	// e.g. a map could route xhigh→xhigh where the generic table maps xhigh→max);
 	// pi's built-in catalog ships no maps today, so the table below is the mapping
-	// for every model unless a models.json entry adds one. Map values are provider-generic strings, so the
-	// cast to EffortLevel assumes the model catalog keeps them CC-compatible.
+	// for every model unless a models.json entry adds one. A null entry means the
+	// level is unsupported on that model — it maps to no effort rather than falling
+	// back to the generic table. Map values are provider-generic strings, so a map
+	// value is trusted only when it names a level CC accepts.
+	const mapped = options?.reasoning ? model.thinkingLevelMap?.[options.reasoning] : undefined;
 	const effort = options?.reasoning
-		? (model.thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
-			?? REASONING_TO_EFFORT[options.reasoning]
+		? mapped === undefined
+			? REASONING_TO_EFFORT[options.reasoning]
+			: VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined
 		: undefined;
 
 	const extraArgs: Record<string, string | null> = { model: cliModel };

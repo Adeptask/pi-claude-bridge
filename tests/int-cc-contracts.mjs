@@ -582,8 +582,10 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 		}
 		// The prompt cache keys the whole request body: the system blocks and the
 		// leading user message must be byte-identical across the transition.
-		// (Block 0 of `system` is a per-request billing header, hence slice(1).)
-		assert.deepEqual(turn1.system.slice(1), turn2.system.slice(1),
+		// (Block 0 of `system` is a per-request billing header, hence slice(1);
+		// later blocks may legitimately carry moved cache_control markers, which are
+		// breakpoint directives, not cache-keyed content.)
+		assert.deepEqual(sansCacheControl(turn1.system).slice(1), sansCacheControl(turn2.system).slice(1),
 			"system prompt changed across a git transition despite includeGitInstructions:false");
 		assert.deepEqual(sansCacheControl(turn1.messages[0]), sansCacheControl(turn2.messages[0]),
 			"leading user message changed across a git transition despite includeGitInstructions:false");
