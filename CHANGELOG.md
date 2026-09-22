@@ -4,7 +4,7 @@
 
 - **Fix: reject leaked pi harness prompts (issue #88)** — Prompts that somehow still reference pi's harness now fail loudly instead of being forwarded and potentially being billed as extra usage. See note in README.
 - **Fix: AskClaude reports its effective configured defaults (issue #65)** — its schema, description, and TUI now agree on mode and isolation, and disabling full mode removes it from the enum.
-- **Bump: require pi ≥0.86.1, develop against 0.87.1** — the 0.86 transcript contract is load-bearing, so the floor moves from `>=0.85.0` to `>=0.86.1` (0.86.1 also carries the Cerebras strict-tool-schema and context-overflow recognition fixes); devDependencies and the lockfile move to `^0.87.1`, where the only suite change needed is `unit-models.mjs`'s opus-shortcut test, which pinned a hardcoded newest-opus id and now derives it from the catalog so the next Anthropic release (0.87.1 added `claude-opus-5-5`) doesn't break it. The no-models startup error now names the new floor.
+- **Bump: require pi ≥0.86.1, drop pre-0.86 compat** — `src/transcript.ts` now replays prompt/tool state through pi-ai's helpers instead of a vendored copy (canonical section re-rank stays local). Also removes the event-stream factory fallback and version-tolerance casts. devDeps move to `^0.87.1`; Agent SDK to `^0.3.280` (the API now rejects older clients); fixes a model-catalog test bug from 0.87.1's added `claude-opus-5-5`.
 
 ## 0.8.0 — 2026-09-20
 

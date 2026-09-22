@@ -1,5 +1,4 @@
-import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
-import * as piAi from "@earendil-works/pi-ai";
+import { calculateCost, createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
@@ -27,13 +26,6 @@ import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
-
-// Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
-const _piAi = piAi as any;
-const newAssistantMessageEventStream: () => AssistantMessageEventStream =
-	typeof _piAi.createAssistantMessageEventStream === "function"
-		? _piAi.createAssistantMessageEventStream
-		: () => new _piAi.AssistantMessageEventStream();
 
 // --- Debug logging ---
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
@@ -440,7 +432,7 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 }
 
 function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const stream = newAssistantMessageEventStream();
+	const stream = createAssistantMessageEventStream();
 	void runIsolatedSummary(model, context, options, stream);
 	return stream;
 }
@@ -451,10 +443,10 @@ async function runIsolatedSummary(
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
-	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
-	// prompt folded into a leading system message ahead of the lone user message (issue #106).
-	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
-	// prompt still reaches CC as its systemPrompt.
+	// pi delivers compaction/branch-summary requests as a transcript: the summarization
+	// prompt folded into a leading system message ahead of the lone user message
+	// (issue #106). toBridgeContext restores the prompt/tools fields the extraction
+	// assertion below assumes; the summarization prompt still reaches CC as its systemPrompt.
 	context = toBridgeContext(context);
 	let sdkQuery: ReturnType<typeof query> | undefined;
 	let wasAborted = false;
@@ -475,7 +467,7 @@ async function runIsolatedSummary(
 			? extractUserPrompt(context.messages)
 			: extractIsolatedSummaryPrompt(context.messages);
 		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
-		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+		const cwd = process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -657,7 +649,7 @@ function syncSharedSession(
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 ): SyncResult {
-	// System messages are pi 0.86's transcript representation of prompt and tool state, not
+	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
 	// the history space (priorMessages, cursor, missed) everywhere below (issue #106).
 	const history = nonSystemMessages(messages);
@@ -989,9 +981,9 @@ function updateUsage(output: AssistantMessage, usage: Record<string, number | un
 	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
 	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
 	if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
-	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
+	// Claude Code may report reasoning/thinking tokens separately from output tokens.
 	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
-	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;
+	if (reasoning != null) output.usage.reasoning = reasoning;
 	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	calculateCost(model, output.usage);
 	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
@@ -1490,9 +1482,9 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
-	// pi 0.86 hands providers a transcript (prompt/tools folded into system messages) —
-	// translate to the 0.85-shaped Context every cursor write, syncSharedSession call and
-	// prompt-capture lookup below assumes (issue #106). A 0.85 host passes through unchanged.
+	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
+	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
+	// prompt-capture lookup below assumes (issue #106).
 	context = toBridgeContext(context);
 
 	// One-off summarizer calls arrive HERE too, not only via isolatedStreamFn: /bug report
@@ -1506,7 +1498,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		return isolatedStreamFn(model, context, options);
 	}
 
-	const stream = newAssistantMessageEventStream();
+	const stream = createAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -1603,7 +1595,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
 
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
 	const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -1647,11 +1639,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
-	// Prefer the model's own thinkingLevelMap when present (pi-ai 0.72+ ships
-	// per-model overrides — e.g. opus-4-7 wants xhigh→xhigh, not xhigh→max).
-	// Fall back to our generic table for older pi-ai or unmapped levels.
+	// Prefer the model's own thinkingLevelMap when present (per-model overrides —
+	// e.g. opus-4.7 wants xhigh→xhigh, not xhigh→max); pi's built-in catalog ships
+	// no maps today, so the generic table below is the mapping for every model
+	// unless a models.json entry adds one. Map values are provider-generic strings, so the
+	// cast to EffortLevel assumes the model catalog keeps them CC-compatible.
 	const effort = options?.reasoning
-		? ((model as any).thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
+		? (model.thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
 			?? REASONING_TO_EFFORT[options.reasoning]
 		: undefined;
 
@@ -2107,18 +2101,16 @@ export default function (pi: ExtensionAPI) {
 	// and ships pi's harness — tripping the server's third-party plan-eligibility check
 	// ("out of extra usage"). Recording it here, before the query, restores the match.
 	//
-	// The widening needs pi's section-based prompt (post-0.85.1); on 0.85.1 the prompt is
-	// a fixed string and this record is a redundant-but-harmless second key that still
-	// catches a later handler rewriting the prompt (it also captures a handler-returned
-	// forceSystemPrompt, which buildSystemPrompt renders verbatim).
+	// agent_start also captures a handler-returned forceSystemPrompt, which
+	// buildSystemPrompt renders verbatim.
 	pi.on("agent_start", (_event, ctx) => {
 		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
 
-	// Mid-run re-renders: turn_start fires before every turn (first turn included, both
-	// architectures) after the turn's prompt is final: prepareNextTurnWithContext has
+	// Mid-run re-renders: turn_start fires before every turn (first turn included)
+	// after the turn's prompt is final: prepareNextTurnWithContext has
 	// re-rendered the options (pi's section-based prompt) and any mid-run
-	// setActiveToolsByName rebuild (0.85.1) already landed. Re-keying at each boundary
+	// setActiveToolsByName rebuild has already landed. Re-keying at each boundary
 	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
 	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
 	// next before_agent_start — accepted: a stale skills list beats failing the turn.
@@ -2243,7 +2235,8 @@ export default function (pi: ExtensionAPI) {
 		apiKey: "not-used",
 		api: "claude-bridge",
 		models: registeredModels,
-		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+		// Cast: the Provider interface passes a TranscriptContext; the bridge takes plain
+		// Context models (toBridgeContext normalizes at the stream entry points).
 		streamSimple: streamClaudeAgentSdk as any,
 	};
 	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {

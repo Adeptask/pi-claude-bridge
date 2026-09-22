@@ -24,7 +24,7 @@ function userMessage(text) {
 	return { role: "user", content: [{ type: "text", text }], timestamp: 0 };
 }
 
-/** A transcript like pi 0.86's: a content-only head carrying the initial tool set, then
+/** A transcript from pi: a content-only head carrying the initial tool set, then
  *  full-section and diff patches. `skills` is deleted then re-added, as when `read` and
  *  `bash` are disabled for a turn and later re-enabled. */
 const SKILLS_REORDERED = [
@@ -108,7 +108,7 @@ describe("toBridgeContext section replay order", () => {
 		assert.deepEqual(context.tools, [grepTool, readTool]);
 	});
 
-	it("returns a context without system messages unchanged (0.85 host shape)", () => {
+	it("returns a context without system messages unchanged (systemless call shape)", () => {
 		const context = { messages: [userMessage("go")], systemPrompt: "P", tools: [] };
 		assert.equal(toBridgeContext(context), context, "same object reference — a true no-op");
 	});

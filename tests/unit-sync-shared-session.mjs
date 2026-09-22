@@ -17,8 +17,8 @@ describe("syncSharedSession", () => {
 		__test.setPiUI(null);
 	});
 
-	// Fresh-session transcript from pi 0.86: the system prompt arrives as a leading system
-	// message (issue #106). It is prompt state, not history — a fresh session must still take
+	// Fresh-session transcript: the system prompt arrives as a leading system message
+	// (issue #106). It is prompt state, not history — a fresh session must still take
 	// the clean-start path (empty priors) rather than rebuild a session file holding nothing
 	// but a system head, which made --resume fail with "No conversation found".
 	it("takes the clean-start path when a transcript system message precedes the first user message", () => {
@@ -37,8 +37,7 @@ describe("syncSharedSession", () => {
 		}
 	});
 
-	// Mid-conversation tool-loadout updates (pi 0.86) also land in the transcript as system
-	// messages. They must not inflate the cursor or be imported as history, or the next turn's
+	// Mid-conversation tool-loadout updates land in the transcript as system messages. They must not inflate the cursor or be imported as history, or the next turn's
 	// reuse check (priors >= cursor) fails and every turn rebuilds the session.
 	it("keeps cursor arithmetic consistent when system messages punctuate the history", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
