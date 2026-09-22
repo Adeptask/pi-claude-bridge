@@ -1093,7 +1093,13 @@ function processStreamEvent(
 	const event = (message as SDKMessage & { event: any }).event;
 
 	if (event?.type === "message_start") {
+		// Still open from an earlier message_start: Claude Code gave up on that
+		// stream and is retrying it. Its blocks were never completed.
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `restreamed as ${event.message?.id}`);
 		c.turnToolCallIds = [];
+		c.turnStreamMessageId = event.message?.id;
+		c.turnStreamOpen = true;
+		c.turnStreamBlockStart = c.turnBlocks.length;
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
 		return;
 	}
@@ -1175,6 +1181,8 @@ function processStreamEvent(
 		return;
 	}
 
+	if (event?.type === "message_stop") c.turnStreamOpen = false;
+
 	if (event?.type === "message_stop" && c.turnSawToolCall) {
 		// Tool call complete — end this pi stream. The SDK will still yield an
 		// assistant message for this turn, but currentPiStream=null causes
@@ -1197,16 +1205,43 @@ function processStreamEvent(
 	}
 }
 
+/** Remove the blocks a stream Claude Code abandoned mid-message. They never got a
+ *  message_stop, so a thinking block has no signature and a tool call is one CC will
+ *  never dispatch; left in, pi would run the tool and the turn would wait on a
+ *  handler that never comes, or the next request would replay a broken block. */
+function dropAbandonedStreamBlocks(c: QueryContext, why: string): void {
+	const dropped = c.turnBlocks.splice(c.turnStreamBlockStart);
+	debug(`dropAbandonedStreamBlocks: ${why}; dropped ${dropped.length} blocks from ${c.turnStreamMessageId} types=${dropped.map((b: any) => b.type).join(",")}`);
+	c.turnToolCallIds = [];
+	c.turnSawToolCall = c.turnBlocks.some((b: any) => b.type === "toolCall");
+	c.turnStreamOpen = false;
+}
+
 // The SDK always yields `assistant` messages (completed content blocks) after streaming.
 // When stream_events already delivered the content, this is a no-op. But after
 // resetTurnState (e.g. tool result delivery), if the next turn's assistant message
 // arrives before any stream_events, this is the primary content path. Must maintain
 // the same stream lifecycle as processStreamEvent — including ending the stream on
 // tool_use to prevent deadlock with the MCP handler.
+//
+// It is also the content path when a stream stalls: Claude Code drops it and asks
+// again without streaming ("Error streaming, falling back to non-streaming mode"),
+// and the answer arrives as one assistant message, under a new message id, with no
+// stream_events of its own. turnSawStreamEvent is already set by the dead stream,
+// so gating on it alone dropped that message: its tool calls never reached pi, CC
+// sat in the MCP handler waiting for their results, and the turn hung on "Working"
+// until the user aborted it.
 function processAssistantMessage(message: SDKMessage, model: Model<any>, customToolNameToPi: Map<string, string>, c: QueryContext): void {
-	if (c.turnSawStreamEvent) return;
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
+	if (c.turnSawStreamEvent) {
+		// Same id was already delivered; a new id is CC's non-streaming fallback.
+		// Drop the stalled stream's partial blocks if it never stopped. Deliberately
+		// deliver even if it stopped, at the risk of duplication if CC renumbers it.
+		const id = assistantMsg.id;
+		if (!id || !c.turnStreamMessageId || id === c.turnStreamMessageId) return;
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `non-streaming fallback ${id}`);
+	}
 	c.turnToolCallIds = [];
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {

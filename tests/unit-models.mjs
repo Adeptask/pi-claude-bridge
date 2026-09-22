@@ -189,3 +189,7 @@ describe("applyLongContext", () => {
 		assert.equal(find(extra, "claude-sonnet-4-6").name, "Claude Sonnet 4.6 1M");
 	});
 });
+
+it("claude-opus-5-5 requests 1M on Pro", () => {
+	assert.deepEqual(resolveClaudeCodeRuntimeModel({ id: "claude-opus-5-5" }, PRO), { cliModelId: "claude-opus-5-5[1m]", contextWindow: 1000000 });
+});
