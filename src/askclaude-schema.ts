@@ -21,6 +21,7 @@ export function resolveAskClaudeDefaults(conf: Config["askClaude"]): AskClaudeDe
 		? PACKAGE_DEFAULT_MODE
 		: configuredMode === "full" || configuredMode === "read" || configuredMode === "none"
 			? configuredMode
+			// Unrecognized value: the most restrictive mode, not the package default.
 			: "none";
 	return { mode: !allowFull && mode === "full" ? PACKAGE_DEFAULT_MODE : mode, isolated: conf?.defaultIsolated ?? PACKAGE_DEFAULT_ISOLATED, allowFull };
 }

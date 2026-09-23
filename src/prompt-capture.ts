@@ -342,6 +342,7 @@ function assertSendablePrompt(parts: readonly PromptPart[], capture: PromptCaptu
 		if (offset !== -1) {
 			findings.push(`pi's preamble ("${PI_PREAMBLE}") in ${label}, at offset ${offset} of ${text.length} chars`);
 		}
+		// The pair has to co-occur in one part; the two phrases split across parts are not detected.
 		if (ANTHROPIC_THIRD_PARTY_TRIGGERS.every((trigger) => text.includes(trigger))) {
 			findings.push(`${ANTHROPIC_THIRD_PARTY_TRIGGERS.join(" and ")} in ${label}`);
 		}

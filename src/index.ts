@@ -1210,7 +1210,10 @@ function processStreamEvent(
 /** Remove the blocks a stream Claude Code abandoned mid-message. They never got a
  *  message_stop, so a thinking block has no signature and a tool call is one CC will
  *  never dispatch; left in, pi would run the tool and the turn would wait on a
- *  handler that never comes, or the next request would replay a broken block. */
+ *  handler that never comes, or the next request would replay a broken block.
+ *  The fallback then restarts those indices. pi's normal provider path tolerates that;
+ *  pi-agent-core's experimental harness frame encoder keys blocks by contentIndex and
+ *  rejects a repeated start, so it would need a change there to drive this provider. */
 function dropAbandonedStreamBlocks(c: QueryContext, why: string): void {
 	const dropped = c.turnBlocks.splice(c.turnStreamBlockStart);
 	debug(`dropAbandonedStreamBlocks: ${why}; dropped ${dropped.length} blocks from ${c.turnStreamMessageId} types=${dropped.map((b: any) => b.type).join(",")}`);
@@ -1676,13 +1679,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
-	// Prefer the model's own thinkingLevelMap when present (per-model overrides —
-	// e.g. a map could route xhigh→xhigh where the generic table maps xhigh→max);
-	// pi's built-in catalog ships no maps today, so the table below is the mapping
-	// for every model unless a models.json entry adds one. A null entry means the
-	// level is unsupported on that model — it maps to no effort rather than falling
-	// back to the generic table. Map values are provider-generic strings, so a map
-	// value is trusted only when it names a level CC accepts.
+	// Prefer the model's own thinkingLevelMap (per-model overrides — e.g. a map can
+	// route xhigh→xhigh where the generic table maps xhigh→max). pi-ai's catalog
+	// ships a map for most Claude models; the table below covers models without
+	// one, and the levels a map leaves unnamed. A null entry means the level is
+	// unsupported on that model: no effort argument is sent, so Claude Code's own
+	// default applies rather than the generic table's value. Map values are
+	// provider-generic strings, so a map value is trusted only when it names a
+	// level CC accepts.
 	const mapped = options?.reasoning ? model.thinkingLevelMap?.[options.reasoning] : undefined;
 	const effort = options?.reasoning
 		? mapped === undefined
