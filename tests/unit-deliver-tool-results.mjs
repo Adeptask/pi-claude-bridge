@@ -97,6 +97,7 @@ describe("deliverToolResults", () => {
 		c.promptStream = rec.promptStream("reject");
 		c.pendingToolCalls.set("call-1", rec.handler("read"));
 		__test.setSharedSession({ sessionId: "abc", cursor: 3, cwd: "/tmp", needsRebuild: false });
+		__test.attachTestOwner(c);
 
 		await __test.deliverToolResults(c, [result("call-1")], steerText, 4);
 
@@ -108,10 +109,27 @@ describe("deliverToolResults", () => {
 		const c = new QueryContext();
 		c.promptStream = null;
 		__test.setSharedSession({ sessionId: "abc", cursor: 3, cwd: "/tmp", needsRebuild: false });
+		__test.attachTestOwner(c);
 
 		await __test.deliverToolResults(c, [], steerText, 4);
 
 		assert.equal(__test.getSharedSession().needsRebuild, true);
+	});
+
+	it("does not deliver a result after the owner shuts down during a steer", async () => {
+		const c = new QueryContext();
+		let acknowledge;
+		const seen = [];
+		c.promptStream = { push: () => new Promise((resolve) => { acknowledge = resolve; }), fail: () => {} };
+		c.pendingToolCalls.set("shared-id", { toolName: "read", resolve: (value) => seen.push(value) });
+		__test.attachTestOwner(c, "session:worker-a");
+		const delivery = __test.deliverToolResults(c, [result("shared-id")], steerText, 3);
+		__test.clearConversation("session:worker-a");
+		acknowledge();
+		await delivery;
+		assert.equal(seen.length, 1, "shutdown settles the handler once");
+		assert.equal(seen[0].content[0].text, "Session ended");
+		assert.equal(c.pendingResults.size, 0, "late delivery did not queue a result");
 	});
 
 	it("queues a result whose handler has not arrived yet", async () => {

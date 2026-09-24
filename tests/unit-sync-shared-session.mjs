@@ -3,13 +3,14 @@
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSession, deleteSession, openSession } from "cc-session-io";
 
 const { __test } = await import("../src/index.js");
+const fingerprint = (messages) => createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 
 describe("syncSharedSession", () => {
 	afterEach(() => {
@@ -49,11 +50,14 @@ describe("syncSharedSession", () => {
 				{ role: "assistant", content: [{ type: "text", text: "Hello." }] },
 			]);
 			seeded.save();
-			__test.setSharedSession({ sessionId, cursor: 2, cwd });
+			__test.setSharedSession({ sessionId, cursor: 2, cwd, historyFingerprint: fingerprint([
+				{ role: "user", content: "Hi", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: 1 },
+			]) });
 
 			const result = __test.syncSharedSession([
-				{ role: "user", content: "Hi", timestamp: Date.now() },
-				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: Date.now() },
+				{ role: "user", content: "Hi", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: 1 },
 				{ role: "system", content: "", toolsAdded: [{ name: "grep", description: "", parameters: {} }], timestamp: Date.now() },
 				{ role: "user", content: "Next", timestamp: Date.now() },
 			], cwd);
@@ -108,6 +112,34 @@ describe("syncSharedSession", () => {
 			);
 			assert.deepEqual(__test.getSharedSession(), mainSession);
 		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("isolates identified sessions and rebuilds when equal-length history changes", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-owned-session-"));
+		const a = "session:worker-a";
+		const b = "session:worker-b";
+		const history = (text) => [
+			{ role: "user", content: text, timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 2 },
+			{ role: "user", content: "continue", timestamp: 3 },
+		];
+		const ids = new Set();
+		try {
+			const firstA = __test.syncSharedSession(history("alpha"), cwd, undefined, undefined, a);
+			const firstB = __test.syncSharedSession(history("beta"), cwd, undefined, undefined, b);
+			ids.add(firstA.sessionId);
+			ids.add(firstB.sessionId);
+			assert.notEqual(firstA.sessionId, firstB.sessionId);
+			assert.equal(__test.syncSharedSession(history("alpha"), cwd, undefined, undefined, a).sessionId, firstA.sessionId);
+			assert.equal(__test.syncSharedSession(history("beta"), cwd, undefined, undefined, b).sessionId, firstB.sessionId);
+			const changed = __test.syncSharedSession(history("alpha changed"), cwd, undefined, undefined, a);
+			assert.equal(changed.sessionId, firstA.sessionId, "rewrite owned file in place");
+			assert.equal(openSession({ sessionId: firstA.sessionId, projectPath: cwd }).messages[0].message.content, "alpha changed");
+			assert.equal(__test.syncSharedSession(history("beta"), cwd, undefined, undefined, b).sessionId, firstB.sessionId);
+		} finally {
+			for (const id of ids) deleteSession(id, cwd);
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
