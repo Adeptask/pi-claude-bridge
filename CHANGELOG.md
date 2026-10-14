@@ -1,5 +1,10 @@
 # Changelog
 
+## UNRELEASED
+
+- **Bump: minimum pi version 1.2.0** — The peer dependencies on `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` now require `>=1.2.0`.
+- **Add: `claude_bridge_probe` tool** — Every session now has one extra tool. It returns a constant status text and has no side effects. It lets Slate load the bridge into worker sessions when AskClaude is disabled.
+
 ## 0.9.3 — 2026-10-13
 
 - **Remove: compaction and branch-summary takeovers (#189)** — pi runs them natively; the bridge routes summary calls to its isolated path. Other compaction extensions should now work. Resolves #115. Thanks @sonSunnoi.

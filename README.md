@@ -21,7 +21,9 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:pi-claude-bridge
 ```
 
-Requires pi 0.86.1 or newer.
+Requires pi 1.2.0 or newer.
+
+The bridge registers one small tool, `claude_bridge_probe`, in every session. It exists only so other extensions can detect the bridge. The model never needs to call it. Slate uses it to load the bridge into worker sessions, also when AskClaude is disabled. Slate does this only when its `workerExtensions` setting lists `pi-claude-bridge`. Slate reads that setting from the home folder or from a trusted project.
 
 ## Provider
 

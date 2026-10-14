@@ -4,6 +4,7 @@ import { buildSessionContext, keyHint, type ExtensionAPI, type ExtensionContext,
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
@@ -2434,7 +2435,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 	if (registeredModels.length === 0) {
-		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.86.1)");
+		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=1.2.0)");
 	}
 
 	if (!config.startupNoticeShown && config.provider?.plan === undefined) {
@@ -2611,6 +2612,20 @@ export default function (pi: ExtensionAPI) {
 			pi.registerProvider(PROVIDER_ID, providerConfig);
 		});
 	}
+
+	// --- Probe tool ---
+
+	// Registered in every session, AskClaude or not, so other extensions can
+	// detect the bridge from its tool. Constant output, no state, no side effects.
+	pi.registerTool({
+		name: "claude_bridge_probe",
+		label: "Claude bridge probe",
+		description: "Exists only so other extensions can detect that the Claude bridge is loaded. You never need to call it.",
+		parameters: Type.Object({}),
+		async execute() {
+			return { content: [{ type: "text" as const, text: "Claude bridge is loaded." }], details: {} };
+		},
+	});
 
 	// --- AskClaude tool ---
 
