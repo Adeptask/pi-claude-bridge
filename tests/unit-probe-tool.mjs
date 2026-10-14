@@ -54,4 +54,9 @@ describe("pi version floor", () => {
 			assert.equal(peerDependencies[name], ">=1.2.0", name);
 		}
 	});
+
+	it("states the floor in the README and the startup error", () => {
+		assert.ok(readFileSync(new URL("../README.md", import.meta.url), "utf-8").includes("Requires pi 1.2.0 or newer"));
+		assert.match(readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8"), /no models available[^\n]*>=1\.2\.0/);
+	});
 });
