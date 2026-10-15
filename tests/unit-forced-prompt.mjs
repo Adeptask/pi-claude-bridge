@@ -154,6 +154,11 @@ describe("forced prompt through the bridge hooks", () => {
 		options.forceSystemPrompt = `${B}\n\nEDITED`;
 		hooks.agent_start({}, ctxOf("again", forced));
 		assert.deepEqual(await query("again", forced), { append: `${APPEND}\n\nAGAIN` });
+		const other = `${B}\n\nOTHER`;
+		hooks.agent_start({}, ctxOf("again", other));
+		const { error } = await query("again", other);
+		assert.match(error, /refusing this turn: agent_start: /);
+		assert.doesNotMatch(error, /self-check/);
 	});
 	it("an unforced run reads only pi's prompt at turn_start", () => {
 		const options = run("unforced", undefined, `${B}\n\nUNFORCED`);

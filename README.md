@@ -121,7 +121,7 @@ A returned `systemPrompt` fails the turn in these cases:
 
 - It does not contain pi's prompt for the run unchanged.
 - A hook that runs after the bridge's hook and before the forcing hook edits pi's prompt options.
-- Another session already recorded the same text as an ordinary prompt.
+- An earlier run or another session already recorded the same text as an ordinary prompt.
 - The forced text changes during the run.
 - Pi's prompt for the run fails to render.
 

@@ -2388,6 +2388,9 @@ async function promptAndWait(
 		`isolated=${options?.isolated ?? false} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
 		`skills=${Boolean(skillsBlock)} promptLen=${prompt.length}`);
 
+	// An aborted call must not start the Claude Code child process at all.
+	if (signal?.aborted) throw new Error("Aborted");
+
 	// skills: [] suppresses Claude Code's own skill listing, a system-reminder naming every
 	// skill under the ~/.claude estate. The provider path gets this for free — `tools: []`
 	// removes the Skill tool and the listing with it — but AskClaude runs on CC's native
@@ -2422,7 +2425,6 @@ async function promptAndWait(
 		wasAborted = true;
 		sdkQuery.interrupt().catch(() => { try { sdkQuery.close(); } catch {} });
 	};
-	if (signal?.aborted) { onAbort(); throw new Error("Aborted"); }
 	signal?.addEventListener("abort", onAbort, { once: true });
 
 	let responseText = "";
