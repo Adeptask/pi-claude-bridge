@@ -16,7 +16,7 @@
  *    verbatim and is covered by the agent_start record.)
  * 2. A prompt composed entirely outside pi's before_agent_start pipeline (issue #102's
  *    pi-web-ui shape) is neither a rendered-options key, a handler-returned force
- *    (which agent_start does capture — see the force test below), nor an embedding.
+ *    (which the bridge records and forwards — see the force test below), nor an embedding.
  * 3. A prompt that changes AFTER turn_start (issue #91's remaining shape): turn_start
  *    re-keys every turn (first included), but a prompt rewritten between turn_start and
  *    the stream call — an extension context-event handler or a forced-prompt projection
@@ -101,19 +101,21 @@ describe("agent_start capture — documented gaps", () => {
 		);
 	});
 
-	it("does capture a handler-returned wholesale replacement: it resolves via the agent_start key", () => {
+	it("forwards a handler-returned prompt that keeps pi's prompt inside it", () => {
 		const handlers = activateWithMockPi();
-		handlers.get("before_agent_start")({ systemPrompt: "pi rendered prompt", systemPromptOptions: {} });
+		const options = { appendSystemPrompt: "append rule" };
+		const ctx = { sessionManager: { getSessionId: () => "gaps-forced" }, getSystemPrompt: () => options.forceSystemPrompt };
+		handlers.get("before_agent_start")({ systemPrompt: "pi rendered prompt", systemPromptOptions: options }, ctx);
 		// A before_agent_start handler that RETURNS a system prompt forces it as the request
 		// head, and pi renders ctx.getSystemPrompt() as exactly that forced text
 		// (buildSystemPromptState returns forceSystemPrompt verbatim).
-		handlers.get("agent_start")({}, { getSystemPrompt: () => "forced replacement prompt owning the request head" });
+		options.forceSystemPrompt = "pi rendered prompt\n\nforced extension rules";
+		handlers.get("agent_start")({}, ctx);
 
-		const capture = __test.promptCaptures.resolve("forced replacement prompt owning the request head");
-		assert.ok(capture, "the forced text becomes a capture key at agent_start");
-		// Caveat pinned by design: only the portable parts are projected for Claude Code;
-		// the forced text's own novel prose is not forwarded (forwarding pi-harness-shaped
-		// prose would trip the server's third-party gate).
+		const capture = __test.promptCaptures.resolve(options.forceSystemPrompt);
+		assert.equal(projectPromptCapture(capture, { skillReadTool: "none" }), "append rule\n\nforced extension rules",
+			"Claude Code gets the hook's text and the base's portable parts, never pi's prompt text");
+		handlers.get("session_shutdown")({}, ctx);
 	});
 
 	it("does not rescue a prompt composed outside the before_agent_start pipeline (#102 shape)", () => {

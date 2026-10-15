@@ -111,11 +111,11 @@ The bridge forwards pi's structured parts — project context files, skills, cus
 | `--append-system-prompt` | Yes, with pi's appended instructions |
 | `context_with_system` editing the system message | Yes when it wraps pi's prompt; the turn fails when it replaces one |
 | `before_agent_start` -> `systemPromptOptions.sections` | Yes, one `<name>` block per section |
-| `before_agent_start` -> `systemPrompt` | No, dropped |
+| `before_agent_start` -> `systemPrompt` | Yes when it contains pi's prompt unchanged; the turn fails otherwise |
 
-Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request. And system-prompt edits work by *wrapping*: replacing pi's prompt leaves the bridge with nothing to match, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions. The error names the closest known prompt and where it diverged.
+Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request. And system-prompt edits work by *wrapping*: the bridge forwards the text around pi's prompt, before, after or on both sides, with pi's portable parts in its place, and never pi's own prompt text. Replacing pi's prompt, or editing inside it, leaves the bridge with nothing to separate, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions or carrying pi's prompt. The error names the cause, or the closest known prompt and where it diverged. Claude Code keeps the first system prompt of a session, so a changed prompt reaches it after `/compact` or in a new session.
 
-To add instructions, use `message`, `context`, or a system-message edit that keeps pi's prompt intact.
+To add instructions, use `message`, `context`, pi's append option (`appendSystemPrompt`), or a system-prompt edit or returned `systemPrompt` that keeps pi's prompt intact.
 
 ### Hooks written for Claude Code
 
