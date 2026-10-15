@@ -144,11 +144,11 @@ describe("markRebuildForSession", () => {
 describe("discardRewrittenQuery", () => {
 	it("stops the parked query being a routing target for the turn's result", () => {
 		const { c } = parkedQuery();
-		assert.equal(contextForToolResults(toolResults), c, "precondition: the result routes to the parked query");
+		assert.equal(contextForToolResults(toolResults, "pi-parent"), c, "precondition: the result routes to the parked query");
 
 		discardRewrittenQuery(c);
 
-		assert.equal(contextForToolResults(toolResults), undefined,
+		assert.equal(contextForToolResults(toolResults, "pi-parent"), undefined,
 			"a result routed here would answer over the conversation pi just discarded");
 		assert.equal(c.activeQuery, null);
 		assert.equal(activeQueryContexts.has(c), false, "routing matches ids only against contexts in this set");

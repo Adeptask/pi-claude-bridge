@@ -4,6 +4,11 @@
 
 - **Bump: minimum pi version 1.2.0** — The peer dependencies on `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` now require `>=1.2.0`. Pi does not check this range at install or load time. Pi versions older than 1.2.0 are unsupported.
 - **Add: `claude_bridge_probe` tool** — Every session now has one extra tool. It returns a constant status text and has no side effects. It lets Slate load the bridge into worker sessions when AskClaude is disabled.
+- **Fix: tool results reach only their own session's query** — A tool result now enters a running query only when the query belongs to the same pi session and is not aborting. A missing session id matches only a missing session id. A matching tool-call id alone no longer routes a worker's result into the host's query. Compared with the fork's `main` branch, an uncancelled late tool result with no owner now resumes its own session's conversation instead of ending empty.
+- **Fix: session start and end clear only that session** — `session_shutdown`, and `session_start` for a new, resumed or forked session, now clear only that session's state. The clear reaches every loaded copy of the bridge, so it also reaches the copy that serves the session's provider calls. Other sessions keep their state.
+- **Fix: the serving marker belongs to the registering session** — Only the end of the session that registered the provider releases the marker. A worker session that ends in the same module copy leaves the host's provider in place.
+- **Fix: the leak report counts only the ending session** — The `session_shutdown` leak warning ignores the queries of other live sessions.
+- **Fix: only a session with a UI sets the UI link** — A session without a UI no longer replaces the host's UI link, so the host's notices still reach the host.
 
 ## 0.9.3 — 2026-10-13
 

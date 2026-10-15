@@ -326,6 +326,29 @@ function sponsorMarkRebuildForSession(piSession: string | null, event: string): 
 	for (const hook of markRebuildHooks) hook(piSession, event);
 }
 
+/** Handlers that drop one pi session's state, one per module instance. A
+ *  session's lifecycle events can run in a different instance from the one
+ *  serving its provider calls, so the clear goes to every instance, the same
+ *  way markRebuildHooks does. Symbol.for: one registry per process. */
+const CLEAR_SESSION_HOOKS_KEY = Symbol.for("claude-bridge:clearSessionHooks");
+type ClearSessionHook = (piSession: string, event: string) => void;
+const clearSessionHooks: Set<ClearSessionHook> =
+	((globalThis as Record<symbol, unknown>)[CLEAR_SESSION_HOOKS_KEY] as Set<ClearSessionHook> | undefined) ?? new Set();
+(globalThis as Record<symbol, unknown>)[CLEAR_SESSION_HOOKS_KEY] = clearSessionHooks;
+
+/** Drop this instance's mirror and rewrite mark for one pi session. Sibling
+ *  sessions and the "(none)" bucket keep theirs. */
+function clearSessionState(piSession: string, event: string): void {
+	if (sharedSessions.delete(sessionKey(piSession))) debug(`${event}: cleared shared session of ${piSession.slice(0, 8)}`);
+	historyRewrittenBySession.delete(piSession);
+}
+clearSessionHooks.add(clearSessionState);
+
+/** Event handlers call this: every module instance drops the session's state. */
+function sponsorClearSession(piSession: string, event: string): void {
+	for (const hook of clearSessionHooks) hook(piSession, event);
+}
+
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
 // Claude Code itself minted the signature. An assistant message whose blocks all
@@ -873,6 +896,8 @@ export const __test = {
 	armStaleContexts,
 	discardRewrittenQuery,
 	contextForToolResults,
+	reportLeaks,
+	getPiLink: () => ({ ui: piUI, mode: piMode }),
 	isQueryAbandoned: (q: object) => abandonedQueries.has(q),
 	get activeQueryContexts() {
 		return activeQueryContexts;
@@ -1010,21 +1035,29 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
  *  ack. The activeQueryContexts leak was present on every single happy-path run and
  *  no test noticed, because nothing asserted that anything ends clean — so assert it
  *  where the real sessions are, and let diag/audit-warnings.mjs scan for it. */
-function reportLeaks(label: string): void {
-	const pendingCalls = [...activeQueryContexts].reduce((n, c) => n + c.pendingToolCalls.size, 0);
-	const liveStreams = [...activeQueryContexts].filter((c) => c.promptStream !== null).length;
-	if (activeQueryContexts.size === 0 && pendingCalls === 0 && liveStreams === 0) return;
+function reportLeaks(label: string, piSessionId: string): boolean {
+	// Only the ending session's queries: a sibling session's parked query is live.
+	const contexts = [...activeQueryContexts].filter((c) => c.piSessionId === piSessionId);
+	if (contexts.length === 0) return false;
+	const pendingCalls = contexts.reduce((n, c) => n + c.pendingToolCalls.size, 0);
+	const liveStreams = contexts.filter((c) => c.promptStream !== null).length;
 	debug(
-		`WARNING: ${label} left state behind — contexts=${activeQueryContexts.size} `
-		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams}`,
+		`WARNING: ${label} left state behind — contexts=${contexts.length} `
+		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams} session=${piSessionId.slice(0, 8)}`,
 	);
+	return true;
 }
 
-function contextForToolResults(results: McpResult[]): QueryContext | undefined {
+/** The parked query these results answer. A match needs the tool-call id, the
+ *  same pi session (a missing id matches only a missing id) and a query that
+ *  still runs and is not aborting. Tool-call ids are not unique across sessions,
+ *  and every later step acts on the context returned here. */
+function contextForToolResults(results: McpResult[], piSessionId: string | null): QueryContext | undefined {
 	for (const result of results) {
 		const id = result.toolCallId;
 		if (!id) continue;
 		for (const queryCtx of activeQueryContexts) {
+			if (queryCtx.piSessionId !== piSessionId || queryCtx.activeQuery === null || queryCtx.aborted) continue;
 			if (queryCtx.pendingToolCalls.has(id) || queryCtx.pendingResults.has(id) || queryCtx.turnToolCallIds.includes(id)) {
 				return queryCtx;
 			}
@@ -1787,7 +1820,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	let activeQuery = ctx().activeQuery !== null;
 	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
-	let resultCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
+	let resultCtx = allResults.length > 0 ? contextForToolResults(allResults, options?.sessionId ?? null) : undefined;
 
 	// pi rewrote its history while this query sat parked at a tool boundary, so the
 	// query answers about a conversation that no longer exists. Discard it and let
@@ -1942,6 +1975,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// first tool result would sit on armed staleness again (the mark is consumed
 	// from the set, not from here) and re-discard a healthy query.
 	queryCtx.historyStale = false;
+	queryCtx.aborted = false;
 	queryCtx.missedSteer = false;
 
 	const cwd = sessionCwdFor(options?.sessionId);
@@ -2085,6 +2119,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	};
 	const onAbort = () => {
 		wasAborted = true;
+		// Routing skips this context from here on: a result arriving before the
+		// killed query finishes must not enter it.
+		abortCtx.aborted = true;
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
@@ -2442,30 +2479,27 @@ export default function (pi: ExtensionAPI) {
 		pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
 	}
 
-	// Reset shared session on pi session lifecycle events
-	const clearSession = (event: string) => {
-		debug(`${event}: clearing ${sharedSessions.size} shared session${sharedSessions.size === 1 ? "" : "s"}`);
-		// Whole map: children never emit session_shutdown (only runtime teardown
-		// and /reload do), so there is no per-entry removal to do here — the
-		// top-level transition takes every mirror with it.
-		sharedSessions.clear();
-		historyRewrittenBySession.clear();
+	// The serving marker (ACTIVE_STREAM_SIMPLE_KEY) belongs to the activation
+	// that registered the provider at load, and to the pi session that activation
+	// starts first. Another activation of the same module instance (a worker
+	// session sharing it) has its own closure, so its session end cannot release it.
+	let ownsServingMarker = false;
+	let servingSessionId: string | undefined;
 
-		// Clear the global streamSimple if this instance registered it.
-		// This allows /reload to work — the old instance clears the flag so
-		// the new instance can register fresh without wrapping stale state.
-		const g = globalThis as Record<symbol, any>;
-		if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
-			debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
-			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
-		}
-	};
+	// Session lifecycle events clear only the session they name, in every module
+	// instance (sponsorClearSession).
 	pi.on("session_start", (event, ctx) => {
-		piUI = ctx.ui;
-		piMode = ctx.mode;
-		rememberSessionCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
+		const piSession = ctx.sessionManager.getSessionId();
+		// Only a session with a UI becomes the UI link. A worker session without one
+		// would otherwise replace the host's link.
+		if (ctx.hasUI) {
+			piUI = ctx.ui;
+			piMode = ctx.mode;
+		}
+		if (ownsServingMarker && servingSessionId === undefined) servingSessionId = piSession;
+		rememberSessionCwd(piSession, ctx.cwd);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-			clearSession(`session_start:${event.reason}`);
+			sponsorClearSession(piSession, `session_start:${event.reason}`);
 		}
 	});
 	pi.on("session_before_compact", (event, ctx) => {
@@ -2532,9 +2566,20 @@ export default function (pi: ExtensionAPI) {
 		recordSystemPrompt("turn_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
-		forgetSessionCwd(ctx.sessionManager.getSessionId());
-		reportLeaks("session_shutdown");
-		clearSession("session_shutdown");
+		const piSession = ctx.sessionManager.getSessionId();
+		forgetSessionCwd(piSession);
+		reportLeaks("session_shutdown", piSession);
+		sponsorClearSession(piSession, "session_shutdown");
+		// Release the serving marker when the registering session ends, so a
+		// freshly loaded module can register as first again (/reload). With no
+		// session recorded (an SDK host that never emits session_start), this
+		// activation's own runner is the one shutting down.
+		const g = globalThis as Record<symbol, any>;
+		const ownSession = servingSessionId === undefined || piSession === servingSessionId;
+		if (ownsServingMarker && ownSession && g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
+			debug("session_shutdown: clearing ACTIVE_STREAM_SIMPLE_KEY");
+			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
+		}
 	});
 
 	// Pi and summary extensions own compaction and branch summaries; native calls use the
@@ -2582,7 +2627,7 @@ export default function (pi: ExtensionAPI) {
 	// self-consistent: that session's traffic flows through this module state,
 	// which starts clean and serves only that session.
 	//
-	// On session_shutdown (including /reload), clearSession() resets
+	// The registering session's session_shutdown (including /reload) resets
 	// ACTIVE_STREAM_SIMPLE_KEY so a freshly loaded module can register as first
 	// again.
 
@@ -2599,6 +2644,7 @@ export default function (pi: ExtensionAPI) {
 	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
 		// First instance: store our streamSimple and register.
 		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+		ownsServingMarker = true;
 		pi.registerProvider(PROVIDER_ID, providerConfig);
 	} else {
 		// Later instance: register only if this session's registry lacks the provider.

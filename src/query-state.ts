@@ -54,6 +54,10 @@ export class QueryContext {
 	 *  the way a module flag does.
 	 */
 	historyStale = false;
+	/** The provider call's signal aborted this query. Its context stays in the
+	 *  routing set until the killed query finishes, and no tool result may enter
+	 *  it in that window. Reset at fresh-query setup. */
+	aborted = false;
 	/** A steer never reached CC. A first query has no session mirror yet, so
 	 *  completion must carry this into the mirror it creates. */
 	missedSteer = false;
