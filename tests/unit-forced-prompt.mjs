@@ -3,19 +3,20 @@
  * append query() receives, or the turn's error. Real pi sessions run pi's ExtensionRunner.
  * The second describe drives the bridge hooks directly, for cases pi 1.2.0 cannot produce:
  * - self-check and turn_start changes: pi renders the forced value verbatim all run;
+ * - a second agent_start: agent.continue() emits it, and no extension here edits the kept options;
  * - two sessions on one activation: each real session here activates its own bridge;
  * - subagent and grandchild: dispatch needs pi-subagents, so the hooks get the child prompt;
  * - eviction: needs 256 other prompts;
  * - ordinary and forced collisions: need two sessions that render one text differently;
  * - render failure: pi's render does not throw;
  * - session_shutdown cleanup: the state is visible only through the hooks;
- * - AskClaude: its tool is off by default, so the test calls its skill resolver.
+ * - AskClaude: its tool is off by default, so this activation turns it on in a temporary config.
  * The file loads with a registry an older bridge left on globalThis, as after /reload.
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 // An older PromptCaptures class has no recordForced.
@@ -23,6 +24,7 @@ const stale = { record() {}, resolve() {}, resolveOrDerive() {}, size: 0 };
 globalThis[Symbol.for("claude-bridge:promptCaptures")] = stale;
 const { default: activate, __test } = await import("../src/index.js");
 const { PI_PREAMBLE, projectPromptCapture } = await import("../src/prompt-capture.js");
+const { globalConfigPath } = await import("../src/config.js");
 
 const HOME = process.env.HOME, agentDir = process.env.PI_CODING_AGENT_DIR, APPEND = "Appended rule.";
 const MODEL = { id: "claude-sonnet-4-6", name: "Bridge", api: "claude-bridge", provider: "claude-bridge", baseUrl: "claude-bridge", reasoning: false, input: ["text"], contextWindow: 200000, maxTokens: 8192, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
@@ -98,8 +100,17 @@ describe("forced prompt through a real pi session", () => {
 
 describe("forced prompt through the bridge hooks", () => {
 	const hooks = {};
+	const tools = {};
 	let provider;
-	activate({ on: (name, handler) => (hooks[name] = handler), registerProvider: (_name, config) => (provider = config), registerTool: () => {} });
+	// The notice marker keeps activation from writing the config back.
+	const configPath = globalConfigPath();
+	mkdirSync(dirname(configPath), { recursive: true });
+	writeFileSync(configPath, JSON.stringify({ startupNoticeShown: "2026-01-01", askClaude: { enabled: true } }));
+	try {
+		activate({ on: (name, handler) => (hooks[name] = handler), registerProvider: (_name, config) => (provider = config), registerTool: (tool) => (tools[tool.name] = tool) });
+	} finally {
+		rmSync(configPath, { force: true });
+	}
 	const B = "Base prompt.";
 	const event = (options, base = B) => ({ systemPromptOptions: options, get systemPrompt() { return options.forceSystemPrompt ?? base; } });
 	const shutdown = (id) => hooks.session_shutdown({}, ctxOf(id));
@@ -116,6 +127,11 @@ describe("forced prompt through the bridge hooks", () => {
 		return result.stopReason === "error" ? { error: result.errorMessage } : { append: sent.at(-1) };
 	}
 	const project = (prompt) => projectPromptCapture(__test.promptCaptures.resolveOrDerive(prompt), { skillReadTool: "none" });
+	async function askClaude(id, prompt) {
+		// AskClaude does not use the stub query, so an aborted signal stops it if it ever gets past the checks.
+		const ctx = { ...ctxOf(id, prompt), ui: { notify() {} } };
+		return (await tools.AskClaude.execute("call", { prompt: "hi", mode: "read", isolated: true }, AbortSignal.abort(), undefined, ctx)).content[0].text;
+	}
 
 	it("self-check: pi's prompt at agent_start must be the forced value", async () => {
 		run("self-check", `${B}\n\nSELF`, "another prompt");
@@ -133,11 +149,19 @@ describe("forced prompt through the bridge hooks", () => {
 		assert.match(error, /turn_start: .*does not match/);
 		assert.doesNotMatch(error, /appendSystemPrompt/, "the advice is only for a hook's prompt shape");
 	});
+	it("a later agent_start in the run compares only pi's prompt (agent.continue)", async () => {
+		const forced = `${B}\n\nAGAIN`, options = run("again", forced);
+		options.forceSystemPrompt = `${B}\n\nEDITED`;
+		hooks.agent_start({}, ctxOf("again", forced));
+		assert.deepEqual(await query("again", forced), { append: `${APPEND}\n\nAGAIN` });
+	});
 	it("an unforced run reads only pi's prompt at turn_start", () => {
 		const options = run("unforced", undefined, `${B}\n\nUNFORCED`);
 		options.forceSystemPrompt = `${B}\n\nSTALE`;
 		hooks.turn_start({}, ctxOf("unforced", `${B}\n\nUNFORCED TURN`));
-		assert.equal(__test.promptCaptures.resolve(`${B}\n\nUNFORCED TURN`).forced, undefined);
+		const capture = __test.promptCaptures.resolve(`${B}\n\nUNFORCED TURN`);
+		assert.ok(capture, "turn_start recorded pi's prompt");
+		assert.equal(capture.forced, undefined);
 	});
 	it("an ordinary prompt never overwrites a forced one, and a forced one never takes an ordinary key", async () => {
 		const forced = `${B}\n\nKIND`;
@@ -163,13 +187,15 @@ describe("forced prompt through the bridge hooks", () => {
 		shutdown("ended");
 		assert.deepEqual(await query("ended", B), { append: APPEND });
 		hooks.turn_start({}, ctxOf("ended", `${B}\n\nAFTER`));
-		assert.equal(__test.promptCaptures.resolve(`${B}\n\nAFTER`).source, "turn_start");
+		const capture = __test.promptCaptures.resolve(`${B}\n\nAFTER`);
+		assert.ok(capture, "turn_start recorded pi's prompt");
+		assert.equal(capture.source, "turn_start");
 	});
-	it("AskClaude fails like the turn for a refused run or an unlinked forced prompt", () => {
+	it("AskClaude fails like the turn for a refused run or an unlinked forced prompt", async () => {
 		run("ask", "Replaced prompt.");
-		assert.throws(() => __test.resolveSkillCapture("Replaced prompt.", "ask"), /refusing this call: .*does not contain/);
+		assert.match(await askClaude("ask", "Replaced prompt."), /^Error: prompt-capture: refusing this call: .*does not contain/);
 		shutdown("ask");
-		assert.throws(() => __test.resolveSkillCapture("Replaced prompt.", "ask"), /contains no system prompt pi rendered/);
+		assert.match(await askClaude("ask", "Replaced prompt."), /^Error: .*contains no system prompt pi rendered/s);
 		assert.equal(__test.resolveSkillCapture(B, "ask").assembledPrompt, B);
 	});
 	it("two sessions on one activation keep their own run state (F3)", async () => {

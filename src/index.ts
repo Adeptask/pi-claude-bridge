@@ -2572,7 +2572,7 @@ export default function (pi: ExtensionAPI) {
 	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
 	// per pi session with the run's base (pi's prompt without a forced value) and forced text.
 	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
-	const runs = new Map<string, { options?: RecordOptions; base?: string; forced?: string }>();
+	const runs = new Map<string, { options?: RecordOptions; base?: string; forced?: string; started?: boolean }>();
 	const sessionOf = (ctx: ExtensionContext | undefined) => ctx?.sessionManager?.getSessionId() ?? "";
 	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
 		customPrompt?: string;
@@ -2633,12 +2633,15 @@ export default function (pi: ExtensionAPI) {
 	// agent_start saves the forced text: a forcing hook may run after this one. In a forced
 	// run pi renders it verbatim at every boundary (the agent_start self-check). Recording
 	// any other prompt as ordinary would drop the extension text, so the run is refused.
-	// Later turns compare only the prompt: pi copies the options object each turn.
+	// Later turns compare only the prompt: pi copies the options object each turn. So does
+	// a later agent_start: agent.continue() emits it again without before_agent_start.
 	function recordRun(source: string, ctx: ExtensionContext) {
 		const session = sessionOf(ctx);
 		const run = runs.get(session);
 		const prompt = ctx.getSystemPrompt();
-		if (run && source === "agent_start") {
+		const first = run !== undefined && source === "agent_start" && !run.started;
+		if (first) {
+			run.started = true;
 			const live = run.options?.forceSystemPrompt;
 			run.forced = live === run.base ? undefined : live;
 		}
@@ -2647,7 +2650,7 @@ export default function (pi: ExtensionAPI) {
 		} else if (prompt === run.forced) {
 			recordForced(session, run.base, source, prompt);
 		} else {
-			refuse(session, `${source === "agent_start" ? "self-check at agent_start" : source}: pi's ${prompt.length}-char `
+			refuse(session, `${first ? "self-check at agent_start" : source}: pi's ${prompt.length}-char `
 				+ `system prompt does not match the ${run.forced.length}-char prompt a hook forced on this run`);
 		}
 	}
