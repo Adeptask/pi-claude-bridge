@@ -233,6 +233,44 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		assert.equal(getSharedSession(H).cursor, late.length, "the host cursor counts the result");
 	});
 
+	it("rotates the session at abort, so a new query before the killed query finishes does not resume it", async () => {
+		scripts.push({ label: "host turn 1", steps: [init("cc-h"), ...text("hi"), result("hi")] });
+		const u1 = user("first"), a1 = asst([{ type: "text", text: "hi" }], "stop");
+		await streamSimple(model, { messages: [u1], tools }, { sessionId: H, signal: liveSignal() }).result();
+		setSharedSession(W, { sessionId: "cc-w", cursor: 2, cwd: process.cwd(), piSessionId: W });
+		const workerMirror = { ...getSharedSession(W) };
+		let releaseKill;
+		const killHeld = new Promise((r) => { releaseKill = r; });
+		// The killed query finishes only when the test releases it.
+		scripts.push({ label: "host turn 2", steps: [init("cc-h"), ...toolUse("toolu_a"), async (killed) => { await killed; await killHeld; }] });
+		const controller = new AbortController();
+		const u2 = user("second");
+		const parked = await streamSimple(model, { messages: [u1, a1, u2], tools }, { sessionId: H, signal: controller.signal }).result();
+		assert.equal(calls[1].resume, "cc-h", "precondition: the parked query resumed the host's session");
+		try {
+			controller.abort();
+			const history = [u1, a1, u2, parked, toolResult("toolu_a")];
+			const cancelled = await streamSimple(model, { messages: history, tools }, { sessionId: H, signal: controller.signal }).result();
+			assert.equal(cancelled.stopReason, "stop", "precondition: the cancelled call ended the turn");
+			assert.ok([...activeQueryContexts].some((c) => c.aborted), "precondition: the killed query has not finished");
+
+			scripts.push({ label: "host turn 3", steps: [init("cc-new"), ...text("next"), result("next")] });
+			const next = await streamSimple(model, { messages: [...history, user("third")], tools }, { sessionId: H, signal: liveSignal() }).result();
+
+			assert.equal(replyText(next), "next");
+			assert.equal(calls.length, 3);
+			assert.ok(calls[2].resume, "the new query resumes a rebuilt session");
+			assert.notEqual(calls[2].resume, "cc-h", "not the session being killed");
+			assert.deepEqual(getSharedSession(W), workerMirror, "the sibling's mirror is untouched");
+		} finally {
+			releaseKill();
+		}
+		await settle();
+		assert.equal(calls[1].closed, true, "precondition: the killed query finished");
+		assert.equal(getSharedSession(H).forceRotate, undefined, "its end does not mark the rotated mirror again");
+		assert.ok(!getSharedSession(H).needsRebuild);
+	});
+
 	it("closes a parked query when its run signal aborts, with no further provider call", async () => {
 		const controller = new AbortController();
 		const worker = await park(W, "toolu_w", controller.signal);
@@ -340,13 +378,31 @@ describe("session lifecycle across module copies", { timeout: 5000 }, () => {
 		assert.equal(getPiLink().mode, "tui");
 	});
 
-	it("gives the marker to a session that registers at session_start, so its end releases it", async () => {
+	it("leaves a marker held by another copy unchanged when a session registers at session_start", async () => {
 		const hostMarker = globalThis[SERVING_MARKER];
 		try {
-			// An activation that took the marker and never received session_shutdown.
-			globalThis[SERVING_MARKER] = function orphanedStreamSimple() {};
+			const holder = function otherCopyStreamSimple() {};
+			globalThis[SERVING_MARKER] = holder;
+			const late = activateWithMockPi((await import("../src/index.js?deferred-held-copy")).default);
+			assert.equal(late.registered.length, 0, "precondition: registration is deferred");
+			late.emit("session_start", { reason: "startup" }, sessionCtx("pi-late", { hasProvider: false }));
+			assert.equal(late.registered.length, 1, "its registry lacked the provider, so it registers");
+			assert.equal(globalThis[SERVING_MARKER], holder, "the marker stays with its holder");
+
+			late.emit("session_shutdown", { reason: "quit" }, sessionCtx("pi-late"));
+			assert.equal(globalThis[SERVING_MARKER], holder, "its end does not release the marker");
+		} finally {
+			globalThis[SERVING_MARKER] = hostMarker;
+		}
+	});
+
+	it("gives a free marker to a session that registers at session_start, so its end releases it", async () => {
+		const hostMarker = globalThis[SERVING_MARKER];
+		try {
 			const late = activateWithMockPi((await import("../src/index.js?deferred-copy")).default);
 			assert.equal(late.registered.length, 0, "precondition: registration is deferred");
+			// The holder ended before this session started.
+			globalThis[SERVING_MARKER] = undefined;
 			late.emit("session_start", { reason: "startup" }, sessionCtx("pi-late", { hasProvider: false }));
 			assert.equal(late.registered.length, 1, "precondition: its registry lacked the provider");
 			assert.equal(globalThis[SERVING_MARKER], late.registered[0].streamSimple, "the registering session owns the marker");

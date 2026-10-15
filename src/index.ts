@@ -2141,11 +2141,26 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		void sdkQuery.interrupt().catch(() => {});
 		try { sdkQuery.close(); } catch {}
 	};
+	// The killed subprocess may flush a late record into this session's JSONL,
+	// so its own mirror's next sync must rebuild and rotate. Marked once, at
+	// abort: a cancelled call ends the turn before the killed query finishes,
+	// and a new query in that gap must not resume the session being killed.
+	// A later call is a no-op, so it cannot re-mark a mirror that a newer
+	// query has already rotated.
+	let abortMarked = false;
+	const markAbortedSession = () => {
+		if (abortMarked) return;
+		abortMarked = true;
+		const state = sessionStateFor(piSessionId);
+		if (state) setSessionStateFor(piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+		debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+	};
 	const onAbort = () => {
 		wasAborted = true;
 		// Routing skips this context from here on: a result arriving before the
 		// killed query finishes must not enter it.
 		abortCtx.aborted = true;
+		markAbortedSession();
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
@@ -2169,11 +2184,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				// The killed subprocess may flush a late record into this session's
-				// JSONL — its own mirror's next sync must rebuild and rotate.
-				const state = sessionStateFor(queryCtx.piSessionId);
-				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
-				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+				markAbortedSession();
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
 					queryCtx.turnOutput.errorMessage = "Operation aborted";
@@ -2222,8 +2233,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				return;
 			}
 			if ((wasAborted || options?.signal?.aborted)) {
-				const state = sessionStateFor(queryCtx.piSessionId);
-				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+				markAbortedSession();
 				queryCtx.heldRateLimit = undefined;
 			} else {
 				// Drop this session's mirror: its conversation is in an unknown
@@ -2504,9 +2514,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// The serving marker (ACTIVE_STREAM_SIMPLE_KEY) belongs to the activation
-	// that registered the provider, and to the pi session that activation starts
-	// first (at load) or registers in (at session_start). Another activation of the same module instance (a worker
-	// session sharing it) has its own closure, so its session end cannot release it.
+	// that took it, and to the pi session that activation starts first (at load)
+	// or registers in (at session_start, when the marker is free). Another
+	// activation of the same module instance (a worker session sharing it) has
+	// its own closure, so its session end cannot release it.
 	let ownsServingMarker = false;
 	let servingSessionId: string | undefined;
 
@@ -2681,12 +2692,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			debug(`provider: registry lacks ${PROVIDER_ID}, registering (module=${moduleInstanceId})`);
-			// This session now serves the provider, so it owns the marker, and its
-			// own end releases it. A marker held by an activation that never got
-			// session_shutdown would otherwise defer every later activation.
-			g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-			ownsServingMarker = true;
-			servingSessionId = ctx.sessionManager.getSessionId();
+			// With the marker free (its holder ended), this session takes it, and
+			// its own end releases it. A marker that another copy still holds stays
+			// with that copy. Limit: a marker held by a lost module load (one that
+			// never receives session_start or session_shutdown) stays held until
+			// the process exits.
+			if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
+				g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+				ownsServingMarker = true;
+				servingSessionId = ctx.sessionManager.getSessionId();
+			}
 			pi.registerProvider(PROVIDER_ID, providerConfig);
 		});
 	}
