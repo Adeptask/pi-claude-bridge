@@ -21,7 +21,7 @@ const { default: activate } = await import("../src/index.js");
 
 function activateWithMockPi(activateFn, options = {}) {
 	// pi appends handlers (a later bridge instance registers two session_start
-	// handlers: clearSession + deferred registration), so the mock does too.
+	// handlers: the session-clearing handler + deferred registration), so the mock does too.
 	const handlers = new Map();
 	const registered = [];
 	(activateFn ?? activate)({

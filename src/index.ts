@@ -349,6 +349,23 @@ function sponsorClearSession(piSession: string, event: string): void {
 	for (const hook of clearSessionHooks) hook(piSession, event);
 }
 
+/** Leak reports, one per module instance. The instance that serves a session's
+ *  queries holds its contexts, and it may not be the one receiving the
+ *  session's end, so the report goes to every instance. Symbol.for: one
+ *  registry per process. */
+const REPORT_LEAKS_HOOKS_KEY = Symbol.for("claude-bridge:reportLeaksHooks");
+type ReportLeaksHook = (label: string, piSession: string) => void;
+const reportLeaksHooks: Set<ReportLeaksHook> =
+	((globalThis as Record<symbol, unknown>)[REPORT_LEAKS_HOOKS_KEY] as Set<ReportLeaksHook> | undefined) ?? new Set();
+(globalThis as Record<symbol, unknown>)[REPORT_LEAKS_HOOKS_KEY] = reportLeaksHooks;
+reportLeaksHooks.add((label, piSession) => { reportLeaks(label, piSession); });
+
+/** Event handlers call this: every module instance reports its own contexts
+ *  of the ending session. */
+function sponsorReportLeaks(label: string, piSession: string): void {
+	for (const hook of reportLeaksHooks) hook(label, piSession);
+}
+
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
 // Claude Code itself minted the signature. An assistant message whose blocks all
@@ -1037,7 +1054,9 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
  *  where the real sessions are, and let diag/audit-warnings.mjs scan for it. */
 function reportLeaks(label: string, piSessionId: string): boolean {
 	// Only the ending session's queries: a sibling session's parked query is live.
-	const contexts = [...activeQueryContexts].filter((c) => c.piSessionId === piSessionId);
+	// An aborted query is still closing: pi ends the session without waiting for
+	// the killed Claude Code process to exit.
+	const contexts = [...activeQueryContexts].filter((c) => c.piSessionId === piSessionId && !c.aborted);
 	if (contexts.length === 0) return false;
 	const pendingCalls = contexts.reduce((n, c) => n + c.pendingToolCalls.size, 0);
 	const liveStreams = contexts.filter((c) => c.promptStream !== null).length;
@@ -1890,8 +1909,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// belongs to is the one whose turn just ended: its cursor advances to
 		// count the result (options.sessionId is that session — pi emits the
 		// result event through the same session's streamSimple call).
-		const orphanState = sessionStateFor(options?.sessionId ?? null);
-		if (orphanState && activeQueryContexts.size === 0) orphanState.cursor = context.messages.length;
+		// Only this session's queries count: another session's live query says
+		// nothing about this cursor.
+		const orphanSession = options?.sessionId ?? null;
+		const orphanState = sessionStateFor(orphanSession);
+		if (orphanState && ![...activeQueryContexts].some((c) => c.piSessionId === orphanSession)) {
+			orphanState.cursor = context.messages.length;
+		}
 		// No query owns this result, so there is no context to reset: resetTurnState
 		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
 		// stranding the blocks it had already emitted. A throwaway context just
@@ -2480,8 +2504,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// The serving marker (ACTIVE_STREAM_SIMPLE_KEY) belongs to the activation
-	// that registered the provider at load, and to the pi session that activation
-	// starts first. Another activation of the same module instance (a worker
+	// that registered the provider, and to the pi session that activation starts
+	// first (at load) or registers in (at session_start). Another activation of the same module instance (a worker
 	// session sharing it) has its own closure, so its session end cannot release it.
 	let ownsServingMarker = false;
 	let servingSessionId: string | undefined;
@@ -2568,12 +2592,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event, ctx) => {
 		const piSession = ctx.sessionManager.getSessionId();
 		forgetSessionCwd(piSession);
-		reportLeaks("session_shutdown", piSession);
+		sponsorReportLeaks("session_shutdown", piSession);
 		sponsorClearSession(piSession, "session_shutdown");
 		// Release the serving marker when the registering session ends, so a
 		// freshly loaded module can register as first again (/reload). With no
 		// session recorded (an SDK host that never emits session_start), this
-		// activation's own runner is the one shutting down.
+		// activation's own runner is the one shutting down. Limit: an SDK host
+		// that shares one module load across several sessions without
+		// session_start releases the marker at the first session end.
 		const g = globalThis as Record<symbol, any>;
 		const ownSession = servingSessionId === undefined || piSession === servingSessionId;
 		if (ownsServingMarker && ownSession && g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
@@ -2655,6 +2681,12 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			debug(`provider: registry lacks ${PROVIDER_ID}, registering (module=${moduleInstanceId})`);
+			// This session now serves the provider, so it owns the marker, and its
+			// own end releases it. A marker held by an activation that never got
+			// session_shutdown would otherwise defer every later activation.
+			g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+			ownsServingMarker = true;
+			servingSessionId = ctx.sessionManager.getSessionId();
 			pi.registerProvider(PROVIDER_ID, providerConfig);
 		});
 	}
