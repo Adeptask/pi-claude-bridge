@@ -113,7 +113,16 @@ The bridge forwards pi's structured parts — project context files, skills, cus
 | `before_agent_start` -> `systemPromptOptions.sections` | Yes, one `<name>` block per section |
 | `before_agent_start` -> `systemPrompt` | Yes when it contains pi's prompt unchanged; the turn fails otherwise |
 
-Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request. And system-prompt edits work by *wrapping*: the bridge forwards the text around pi's prompt, before, after or on both sides, with pi's portable parts in its place, and never pi's own prompt text. Replacing pi's prompt, or editing inside it, leaves the bridge with nothing to separate, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions or carrying pi's prompt. The error names the cause, or the closest known prompt and where it diverged. Claude Code keeps the first system prompt of a session, so a changed prompt reaches it after `/compact` or in a new session.
+Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt. It discards any `context_with_system` edit in the same run, so only one reaches the request. And system-prompt edits work by *wrapping*. The bridge forwards the text before, after or around pi's prompt, with pi's portable parts in its place. It never forwards pi's own prompt text. If a hook replaces pi's prompt or edits inside it, the bridge cannot separate the two, so it refuses the turn. Otherwise Claude Code would get a request without your context files, skills and custom instructions, or with pi's prompt in it.
+
+A returned `systemPrompt` fails the turn in these cases:
+
+- It does not contain pi's prompt for the run unchanged.
+- A hook that runs after the bridge's hook and before the forcing hook edits pi's prompt options.
+- The forced text changes during the run.
+- Pi's prompt for the run fails to render.
+
+An AskClaude call in that run fails the same way. The error names the cause, or the closest known prompt and where it diverged. Claude Code keeps the first system prompt of a session, so a changed prompt reaches it after `/compact` or in a new session.
 
 To add instructions, use `message`, `context`, pi's append option (`appendSystemPrompt`), or a system-prompt edit or returned `systemPrompt` that keeps pi's prompt intact.
 

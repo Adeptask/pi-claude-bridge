@@ -310,7 +310,9 @@ const ANTHROPIC_THIRD_PARTY_TRIGGERS = ["docs/custom-provider.md", "docs/package
 /** One piece of the append, named so a refusal can say where it found the text. */
 type PromptPart = { label: string; text: string };
 
-const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
+// Versioned: after /reload the new module must not reuse an instance of an older
+// PromptCaptures class. Bump the version when the class changes shape.
+const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures:v2");
 
 /** Isolated agents re-evaluate this module; a process-wide instance lets the pinned
  *  stream resolve their captures (issue #64). The first instance's onDiagnose wins —
@@ -325,6 +327,13 @@ export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiag
  *  forced captures. Forced links are strictly shorter, so the walk ends. */
 export function forcedReaches(capture: PromptCapture, isBase: (node: PromptCapture) => boolean): boolean {
 	return capture.inherited.some((edge) => isBase(edge.parent) || (!!edge.parent.forced && forcedReaches(edge.parent, isBase)));
+}
+
+/** A forced capture that reaches no ordinary capture has no pi prompt to separate. */
+export function assertForcedLinked(capture: PromptCapture): void {
+	if (capture.forced && !forcedReaches(capture, (node) => !node.forced)) throw new Error(
+		`prompt-capture: the ${capture.assembledPrompt.length}-char prompt a before_agent_start hook forced contains no system prompt pi rendered, `
+		+ `so the bridge cannot separate the hook's text from pi's. ${FORCED_PROMPT_ADVICE}`);
 }
 
 export function projectPromptCapture(
@@ -367,9 +376,7 @@ function projectCapture(
 	if (visiting.has(capture)) throw new Error("Cyclic prompt inheritance");
 	visiting.add(capture);
 	try {
-		if (capture.forced && !forcedReaches(capture, (node) => !node.forced)) throw new Error(
-			`prompt-capture: the ${capture.assembledPrompt.length}-char prompt a before_agent_start hook forced contains no recorded base prompt, `
-			+ `so the bridge cannot separate the hook's text from pi's. ${FORCED_PROMPT_ADVICE}`);
+		assertForcedLinked(capture);
 		const inheritedSkillPaths = new Set(
 			capture.inherited.flatMap((edge) => collectPromptSkills(edge.parent).map((skill) => skill.filePath)),
 		);
