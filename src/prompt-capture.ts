@@ -29,7 +29,14 @@ export type PromptCapture = PromptCaptureInput & {
 	source?: string;
 	/** Exact previously assembled prompts embedded in `custom`. */
 	inherited: InheritedPrompt[];
+	/** A prompt a before_agent_start hook returned. `custom` is the whole text and the
+	 *  portable parts come only through its links to the run's base capture. */
+	forced?: boolean;
 };
+
+/** The fix a user can apply when a forced prompt cannot be forwarded. */
+export const FORCED_PROMPT_ADVICE = "A before_agent_start hook that returns systemPrompt must keep pi's prompt unchanged inside it. "
+	+ "To add text without that constraint, use pi's append option (systemPromptOptions.appendSystemPrompt), which the bridge forwards.";
 
 /**
  * Captures keyed by the fully assembled prompt pi sends to a provider.
@@ -78,6 +85,8 @@ export class PromptCaptures {
 
 	record(systemPrompt: string, input: PromptCaptureInput, source?: string): void {
 		const existing = this.captures.get(systemPrompt);
+		// A capture never changes kind: the forced text owns its key.
+		if (existing?.forced) return;
 		const customChanged = existing?.custom !== input.custom;
 		const capture = existing ?? {
 			...input,
@@ -102,6 +111,24 @@ export class PromptCaptures {
 		// Mutate an existing node in place so descendants retain a live reference,
 		// then re-insert its key so Map order tracks recency.
 		this.touch(systemPrompt, capture);
+	}
+
+	/** A forced prompt has no portable parts of its own: projection substitutes the base it
+	 *  contains. Links are recomputed on every record, also for the forced captures in its
+	 *  chain, so one recorded before its base recovers. Undefined for an ordinary capture. */
+	recordForced(systemPrompt: string, source: string): PromptCapture | undefined {
+		const existing = this.captures.get(systemPrompt);
+		if (existing && !existing.forced) return undefined;
+		const capture = existing
+			?? { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: [], forced: true };
+		capture.source = source;
+		const relink = (node: PromptCapture): void => {
+			node.inherited = this.findInheritedPrompts(node.assembledPrompt, node.custom);
+			for (const edge of node.inherited) if (edge.parent.forced) relink(edge.parent);
+		};
+		relink(capture);
+		this.touch(systemPrompt, capture);
+		return capture;
 	}
 
 	/** Exact lookup only. Callers serving a query want `resolveOrDerive`. */
@@ -283,7 +310,9 @@ const ANTHROPIC_THIRD_PARTY_TRIGGERS = ["docs/custom-provider.md", "docs/package
 /** One piece of the append, named so a refusal can say where it found the text. */
 type PromptPart = { label: string; text: string };
 
-const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
+// Versioned: after /reload the new module must not reuse an instance of an older
+// PromptCaptures class. Bump the version when the class changes shape.
+const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures:v2");
 
 /** Isolated agents re-evaluate this module; a process-wide instance lets the pinned
  *  stream resolve their captures (issue #64). The first instance's onDiagnose wins —
@@ -292,6 +321,19 @@ const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
 export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void): PromptCaptures {
 	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
 	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose));
+}
+
+/** Whether a forced capture's links reach a node `isBase` accepts, directly or through
+ *  forced captures. Forced links are strictly shorter, so the walk ends. */
+export function forcedReaches(capture: PromptCapture, isBase: (node: PromptCapture) => boolean): boolean {
+	return capture.inherited.some((edge) => isBase(edge.parent) || (!!edge.parent.forced && forcedReaches(edge.parent, isBase)));
+}
+
+/** A forced capture that reaches no ordinary capture has no pi prompt to separate. */
+export function assertForcedLinked(capture: PromptCapture): void {
+	if (capture.forced && !forcedReaches(capture, (node) => !node.forced)) throw new Error(
+		`prompt-capture: the ${capture.assembledPrompt.length}-char prompt a before_agent_start hook forced contains no system prompt pi rendered, `
+		+ `so the bridge cannot separate the hook's text from pi's. ${FORCED_PROMPT_ADVICE}`);
 }
 
 export function projectPromptCapture(
@@ -334,6 +376,7 @@ function projectCapture(
 	if (visiting.has(capture)) throw new Error("Cyclic prompt inheritance");
 	visiting.add(capture);
 	try {
+		assertForcedLinked(capture);
 		const inheritedSkillPaths = new Set(
 			capture.inherited.flatMap((edge) => collectPromptSkills(edge.parent).map((skill) => skill.filePath)),
 		);

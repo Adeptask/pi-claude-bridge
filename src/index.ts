@@ -18,7 +18,10 @@ import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown, type Config } from "./config.js";
 import {
+	assertForcedLinked,
 	collectPromptSkills,
+	FORCED_PROMPT_ADVICE,
+	forcedReaches,
 	projectPromptCapture,
 	sharedPromptCaptures,
 	type PromptCapture,
@@ -943,6 +946,7 @@ export const __test = {
 	get promptCaptures() {
 		return promptCaptures;
 	},
+	resolveSkillCapture,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -1042,6 +1046,11 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
 		) + ` known keys=${diagnostic.matches.length}`,
 	);
 });
+
+// Why each pi session's current run cannot be forwarded. Process-wide, so the pinned
+// stream of any module instance sees it. The next run of the session clears it.
+const promptRefusals: Map<string, string> = ((globalThis as Record<symbol, Map<string, string> | undefined>)[
+	Symbol.for("claude-bridge:promptRefusals")] ??= new Map());
 
 /** Whatever a settled session left behind, named in one greppable line.
  *
@@ -1952,6 +1961,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	let promptCapture: PromptCapture | undefined;
 	let systemPromptAppend: string | undefined;
 	try {
+		const refusal = promptRefusals.get(options?.sessionId ?? "");
+		if (refusal) throw new Error(`prompt-capture: refusing this turn: ${refusal}`);
 		promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
 		systemPromptAppend = promptCapture
 			? projectPromptCapture(promptCapture, {
@@ -2285,6 +2296,16 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 // --- AskClaude: prompt and wait ---
 
+/** The capture AskClaude reads skills from. A refused run, or a forced prompt with no
+ *  pi prompt inside it, throws like the provider turn: its skills cannot be told apart. */
+function resolveSkillCapture(systemPrompt: string | undefined, piSessionId: string | null | undefined): PromptCapture | undefined {
+	const refusal = promptRefusals.get(piSessionId ?? "");
+	if (refusal) throw new Error(`prompt-capture: refusing this call: ${refusal}`);
+	const capture = promptCaptures.resolveOrDerive(systemPrompt);
+	if (capture) assertForcedLinked(capture);
+	return capture;
+}
+
 async function promptAndWait(
 	prompt: string,
 	mode: "full" | "read" | "none",
@@ -2344,7 +2365,7 @@ async function promptAndWait(
 	// to open a skill file with — an unrelated miss must not fail the call.
 	const skillReadTool = disallowedTools.includes("Read") ? "none" : "native";
 	const skillCapture = options?.appendSkills !== false && skillReadTool !== "none"
-		? promptCaptures.resolveOrDerive(options?.systemPrompt)
+		? resolveSkillCapture(options?.systemPrompt, options?.piSessionId)
 		: undefined;
 	const skillsBlock = skillCapture
 		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool)
@@ -2366,6 +2387,9 @@ async function promptAndWait(
 		`mode=${mode} model=${modelId} cliModel=${cliModel} effort=${effort ?? "default"}`,
 		`isolated=${options?.isolated ?? false} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
 		`skills=${Boolean(skillsBlock)} promptLen=${prompt.length}`);
+
+	// An aborted call must not start the Claude Code child process at all.
+	if (signal?.aborted) throw new Error("Aborted");
 
 	// skills: [] suppresses Claude Code's own skill listing, a system-reminder naming every
 	// skill under the ~/.claude estate. The provider path gets this for free — `tools: []`
@@ -2401,7 +2425,6 @@ async function promptAndWait(
 		wasAborted = true;
 		sdkQuery.interrupt().catch(() => { try { sdkQuery.close(); } catch {} });
 	};
-	if (signal?.aborted) { onAbort(); throw new Error("Aborted"); }
 	signal?.addEventListener("abort", onAbort, { once: true });
 
 	let responseText = "";
@@ -2549,11 +2572,13 @@ export default function (pi: ExtensionAPI) {
 	//
 	// The options (custom/append/contextFiles/skills/sections) are pi config, stable across a
 	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
-	// at before_agent_start so the agent_start recording below can reuse them.
+	// per pi session with the run's base (pi's prompt without a forced value) and forced text.
 	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
-	let lastSystemPromptOptions: RecordOptions | undefined;
+	const runs = new Map<string, { options?: RecordOptions; base?: string; forced?: string; started?: boolean }>();
+	const sessionOf = (ctx: ExtensionContext | undefined) => ctx?.sessionManager?.getSessionId() ?? "";
 	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
 		customPrompt?: string;
+		forceSystemPrompt?: string;
 		appendSystemPrompt?: string;
 		contextFiles?: { path: string; content: string }[];
 		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
@@ -2570,10 +2595,67 @@ export default function (pi: ExtensionAPI) {
 			sections: options?.sections,
 		}, source);
 	}
-	pi.on("before_agent_start", (event) => {
-		lastSystemPromptOptions = event.systemPromptOptions;
-		recordSystemPrompt("before_agent_start", event.systemPrompt, event.systemPromptOptions);
+	function refuse(session: string, cause: string) {
+		if (promptRefusals.has(session)) return;
+		promptRefusals.set(session, cause);
+		debug(`prompt-capture: refusing the run of session ${session}: ${cause}`);
+	}
+	// A forced prompt is forwarded as its own text with this run's base swapped for the
+	// base's portable parts. Without the base inside it, the two cannot be separated.
+	function recordForced(session: string, base: string | undefined, source: string, forced: string) {
+		const capture = promptCaptures.recordForced(forced, source);
+		if (!capture) refuse(session, `the ${forced.length}-char forced prompt is already recorded as an ordinary prompt`);
+		else if (base === undefined || !forcedReaches(capture, (node) => node.assembledPrompt === base)) {
+			refuse(session, `the ${forced.length}-char prompt a before_agent_start hook forced does not contain `
+				+ `pi's own ${base?.length ?? 0}-char system prompt for this run unchanged. A hook that edits pi's prompt `
+				+ `options after the bridge's hook and before the forcing hook also causes this. ${FORCED_PROMPT_ADVICE}`);
+		}
+	}
+	// A hook before this one may have forced a prompt, so take the forced value off the
+	// shared options object for one synchronous render of the base. The base is never
+	// rendered later: pi edits the run's tool list after the hooks.
+	pi.on("before_agent_start", (event, ctx) => {
+		const session = sessionOf(ctx);
+		const options = event.systemPromptOptions;
+		const forced = options?.forceSystemPrompt;
+		const run: { options?: RecordOptions; base?: string } = { options };
+		runs.set(session, run);
+		promptRefusals.delete(session);
+		try {
+			if (forced !== undefined) options.forceSystemPrompt = undefined;
+			run.base = event.systemPrompt;
+		} catch (err) {
+			refuse(session, `rendering pi's own system prompt for this run failed: ${errorMessage(err)}`);
+		} finally {
+			if (forced !== undefined) options.forceSystemPrompt = forced;
+		}
+		recordSystemPrompt("before_agent_start", run.base, options);
+		if (forced !== undefined && forced !== run.base) recordForced(session, run.base, "before_agent_start", forced);
 	});
+	// agent_start saves the forced text: a forcing hook may run after this one. In a forced
+	// run pi renders it verbatim at every boundary (the agent_start self-check). Recording
+	// any other prompt as ordinary would drop the extension text, so the run is refused.
+	// Later turns compare only the prompt: pi copies the options object each turn. So does
+	// a later agent_start: agent.continue() emits it again without before_agent_start.
+	function recordRun(source: string, ctx: ExtensionContext) {
+		const session = sessionOf(ctx);
+		const run = runs.get(session);
+		const prompt = ctx.getSystemPrompt();
+		const first = run !== undefined && source === "agent_start" && !run.started;
+		if (first) {
+			run.started = true;
+			const live = run.options?.forceSystemPrompt;
+			run.forced = live === run.base ? undefined : live;
+		}
+		if (run?.forced === undefined) {
+			recordSystemPrompt(source, prompt, run?.options);
+		} else if (prompt === run.forced) {
+			recordForced(session, run.base, source, prompt);
+		} else {
+			refuse(session, `${first ? "self-check at agent_start" : source}: pi's ${prompt.length}-char `
+				+ `system prompt does not match the ${run.forced.length}-char prompt a hook forced on this run`);
+		}
+	}
 	// The prompt the provider actually queries with is the fully-widened one: MCP tool
 	// descriptions merge into the system prompt only after their servers connect, which
 	// is after before_agent_start. ctx.getSystemPrompt() returns that widened prompt by
@@ -2583,12 +2665,7 @@ export default function (pi: ExtensionAPI) {
 	// too, the child's turn resolves against nothing, falls to a verbatim side request,
 	// and ships pi's harness — tripping the server's third-party plan-eligibility check
 	// ("out of extra usage"). Recording it here, before the query, restores the match.
-	//
-	// agent_start also captures a handler-returned forceSystemPrompt, which
-	// buildSystemPrompt renders verbatim.
-	pi.on("agent_start", (_event, ctx) => {
-		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
-	});
+	pi.on("agent_start", (_event, ctx) => recordRun("agent_start", ctx));
 
 	// Mid-run re-renders: turn_start fires before every turn (first turn included)
 	// after the turn's prompt is final: prepareNextTurnWithContext has
@@ -2597,12 +2674,12 @@ export default function (pi: ExtensionAPI) {
 	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
 	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
 	// next before_agent_start — accepted: a stale skills list beats failing the turn.
-	pi.on("turn_start", (_event, ctx) => {
-		recordSystemPrompt("turn_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
-	});
+	pi.on("turn_start", (_event, ctx) => recordRun("turn_start", ctx));
 	pi.on("session_shutdown", (_event, ctx) => {
 		const piSession = ctx.sessionManager.getSessionId();
 		forgetSessionCwd(piSession);
+		runs.delete(piSession);
+		promptRefusals.delete(piSession);
 		sponsorReportLeaks("session_shutdown", piSession);
 		sponsorClearSession(piSession, "session_shutdown");
 		// Release the serving marker when the registering session ends, so a
