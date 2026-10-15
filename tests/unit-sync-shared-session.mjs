@@ -3,14 +3,13 @@
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSession, deleteSession, openSession } from "cc-session-io";
 
 const { __test } = await import("../src/index.js");
-const fingerprint = (messages) => createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 
 describe("syncSharedSession", () => {
 	afterEach(() => {
@@ -32,7 +31,7 @@ describe("syncSharedSession", () => {
 
 			assert.equal(result.sessionId, null, "a fresh session with only prompt state as priors is a clean start");
 			assert.equal(result.preserveSharedSession, undefined);
-			assert.equal(__test.getSharedSession(), null, "a clean start must not create a session state");
+			assert.equal(__test.getSharedSession(null), null, "a clean start must not create a session state");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -50,20 +49,17 @@ describe("syncSharedSession", () => {
 				{ role: "assistant", content: [{ type: "text", text: "Hello." }] },
 			]);
 			seeded.save();
-			__test.setSharedSession({ sessionId, cursor: 2, cwd, historyFingerprint: fingerprint([
-				{ role: "user", content: "Hi", timestamp: 1 },
-				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: 1 },
-			]) });
+			__test.setSharedSession(null, { sessionId, cursor: 2, cwd });
 
 			const result = __test.syncSharedSession([
-				{ role: "user", content: "Hi", timestamp: 1 },
-				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: 1 },
+				{ role: "user", content: "Hi", timestamp: Date.now() },
+				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: Date.now() },
 				{ role: "system", content: "", toolsAdded: [{ name: "grep", description: "", parameters: {} }], timestamp: Date.now() },
 				{ role: "user", content: "Next", timestamp: Date.now() },
 			], cwd);
 
 			assert.equal(result.sessionId, sessionId, "2 priors at cursor 2 must resume, not rebuild");
-			assert.equal(__test.getSharedSession()?.cursor, 2, "cursor counts non-system messages only");
+			assert.equal(__test.getSharedSession(null)?.cursor, 2, "cursor counts non-system messages only");
 			const session = openSession({ sessionId, projectPath: cwd });
 			assert.deepEqual(
 				session.messages.map((m) => m.type),
@@ -90,7 +86,7 @@ describe("syncSharedSession", () => {
 				cursor: 42,
 				cwd,
 			};
-			__test.setSharedSession(mainSession);
+			__test.setSharedSession(null, mainSession);
 
 			const result = __test.syncSharedSession([
 				{
@@ -110,36 +106,8 @@ describe("syncSharedSession", () => {
 				true,
 				"the fresh session must not replace the parent's when it completes",
 			);
-			assert.deepEqual(__test.getSharedSession(), mainSession);
+			assert.deepEqual(__test.getSharedSession(null), mainSession);
 		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-
-	it("isolates identified sessions and rebuilds when equal-length history changes", () => {
-		const cwd = mkdtempSync(join(tmpdir(), "sync-owned-session-"));
-		const a = "session:worker-a";
-		const b = "session:worker-b";
-		const history = (text) => [
-			{ role: "user", content: text, timestamp: 1 },
-			{ role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 2 },
-			{ role: "user", content: "continue", timestamp: 3 },
-		];
-		const ids = new Set();
-		try {
-			const firstA = __test.syncSharedSession(history("alpha"), cwd, undefined, undefined, a);
-			const firstB = __test.syncSharedSession(history("beta"), cwd, undefined, undefined, b);
-			ids.add(firstA.sessionId);
-			ids.add(firstB.sessionId);
-			assert.notEqual(firstA.sessionId, firstB.sessionId);
-			assert.equal(__test.syncSharedSession(history("alpha"), cwd, undefined, undefined, a).sessionId, firstA.sessionId);
-			assert.equal(__test.syncSharedSession(history("beta"), cwd, undefined, undefined, b).sessionId, firstB.sessionId);
-			const changed = __test.syncSharedSession(history("alpha changed"), cwd, undefined, undefined, a);
-			assert.equal(changed.sessionId, firstA.sessionId, "rewrite owned file in place");
-			assert.equal(openSession({ sessionId: firstA.sessionId, projectPath: cwd }).messages[0].message.content, "alpha changed");
-			assert.equal(__test.syncSharedSession(history("beta"), cwd, undefined, undefined, b).sessionId, firstB.sessionId);
-		} finally {
-			for (const id of ids) deleteSession(id, cwd);
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
@@ -173,7 +141,7 @@ describe("syncSharedSession", () => {
 			);
 			seeded.save();
 
-			__test.setSharedSession({ sessionId, cursor: 0, cwd });
+			__test.setSharedSession(null, { sessionId, cursor: 0, cwd });
 			__test.setPiUI({ notify: (message) => notices.push(message) });
 			__test.syncSharedSession([
 				{ role: "user", content: prompt, timestamp: Date.now() },

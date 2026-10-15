@@ -16,16 +16,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 const PROVIDER_ID = "claude-bridge";
-let firstStream;
 
 const { default: activate } = await import("../src/index.js");
 
 function activateWithMockPi(activateFn, options = {}) {
 	// pi appends handlers (a later bridge instance registers two session_start
-	// handlers: clearSession + deferred registration), so the mock does too.
+	// handlers: the session-clearing handler + deferred registration), so the mock does too.
 	const handlers = new Map();
 	const registered = [];
-	const tools = [];
 	(activateFn ?? activate)({
 		on: (event, handler) => {
 			const list = handlers.get(event) ?? [];
@@ -33,13 +31,15 @@ function activateWithMockPi(activateFn, options = {}) {
 			handlers.set(event, list);
 		},
 		registerProvider: (name, config) => registered.push({ name, config }),
-		registerTool: (tool) => tools.push(tool),
+		registerTool: () => {},
 	});
 	const emit = (event, ...args) => {
 		for (const handler of handlers.get(event) ?? []) handler(...args);
 	};
-	return { handlers, registered, tools, emit };
+	return { handlers, registered, emit };
 }
+
+const sessionCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "test-session" } };
 
 function registryWith(provider) {
 	return { getProvider: (id) => (id === provider ? { name: provider } : undefined) };
@@ -50,16 +50,6 @@ describe("provider registration across module instances", () => {
 		const { registered } = activateWithMockPi();
 		assert.equal(registered.length, 1, "exactly one activation-time registration");
 		assert.equal(registered[0].name, PROVIDER_ID);
-		firstStream = registered[0].config.streamSimple;
-	});
-
-	it("registers a status-only discovery probe", async () => {
-		const { tools } = activateWithMockPi();
-		const probe = tools.find((tool) => tool.name === "claude_bridge_probe");
-		assert.ok(probe);
-		assert.deepEqual(await probe.execute(), {
-			content: [{ type: "text", text: "Claude bridge extension is loaded." }], details: {},
-		});
 	});
 
 	it("later instance registers at session_start when its registry lacks the provider (#91)", async () => {
@@ -69,12 +59,10 @@ describe("provider registration across module instances", () => {
 		const { registered, emit } = activateWithMockPi(activateFresh);
 		assert.equal(registered.length, 0, "no activation-time registration for a later instance");
 
-		emit("session_start", {}, { modelRegistry: registryWith("other-provider") });
+		emit("session_start", {}, { ...sessionCtx, modelRegistry: registryWith("other-provider") });
 		assert.equal(registered.length, 1, "session_start registers into the empty registry");
 		assert.equal(registered[0].name, PROVIDER_ID);
-		assert.ok(registered[0].config.streamSimple, "the registration carries a live stream fn");
-		assert.strictEqual(registered[0].config.streamSimple, firstStream,
-			"child registration uses the owner callback while the owner is live");
+		assert.ok(registered[0].config.streamSimple, "the registration carries this instance's stream fn");
 	});
 
 	it("later instance does not re-register when the registry already has the provider", async () => {
@@ -82,11 +70,11 @@ describe("provider registration across module instances", () => {
 		const { registered, emit } = activateWithMockPi(activateFresh);
 
 		// Host passed the parent's registry down: the provider is already there.
-		emit("session_start", {}, { modelRegistry: registryWith(PROVIDER_ID) });
+		emit("session_start", {}, { ...sessionCtx, modelRegistry: registryWith(PROVIDER_ID) });
 		assert.equal(registered.length, 0, "no overwrite of the parent's registration");
 
 		// Repeated session starts stay idempotent.
-		emit("session_start", {}, { modelRegistry: registryWith(PROVIDER_ID) });
+		emit("session_start", {}, { ...sessionCtx, modelRegistry: registryWith(PROVIDER_ID) });
 		assert.equal(registered.length, 0, "still no registration on a later session_start");
 	});
 });
