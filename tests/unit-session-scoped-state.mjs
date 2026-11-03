@@ -6,10 +6,10 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createSession, getSessionPath } from "cc-session-io";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { resetCtx } from "../src/query-state.js";
+import { dirname, join } from "node:path";
 
 const claudeDir = mkdtempSync(join(tmpdir(), "claude-bridge-session-scoped-cc-"));
 process.env.CLAUDE_CONFIG_DIR = claudeDir;
@@ -23,7 +23,7 @@ const SERVING_MARKER = Symbol.for("claude-bridge:activeStreamSimple");
 const mod = await import("../src/index.js");
 const {
 	setQuery, resetSharedSession, setSharedSession, getSharedSession, activeQueryContexts,
-	historyRewrittenBySession, markRebuildForSession, isQueryAbandoned, reportLeaks, getPiLink,
+	historyRewrittenBySession, markRebuildForSession, isQueryAbandoned, getPiLink,
 } = mod.__test;
 
 // pi appends handlers per event, so the mock does too.
@@ -56,7 +56,7 @@ function leakWarnings(action) {
 	const read = () => (existsSync(path) ? readFileSync(path, "utf8") : "");
 	const before = read().length;
 	action();
-	return read().slice(before).split("\n").filter((line) => line.includes("WARNING: session_shutdown left state behind"));
+	return read().slice(before).split("\n").filter((line) => line.includes("WARNING: session_shutdown left a context with no query"));
 }
 
 const calls = [];
@@ -111,22 +111,54 @@ async function park(sessionId, toolId, signal = liveSignal()) {
 beforeEach(() => {
 	resetSharedSession();
 	activeQueryContexts.clear();
-	resetCtx();
 	calls.length = 0;
 	scripts.length = 0;
 	setQuery(({ prompt, options }) => {
 		const script = scripts.shift();
 		if (!script) throw new Error("no fake script queued");
-		const call = { label: script.label, resume: options.resume, closed: false };
+		const id = options.sessionId ?? options.resume;
+		const call = { label: script.label, resume: options.resume, id, closed: false };
 		calls.push(call);
 		let onClose;
 		const killed = new Promise((r) => { onClose = r; });
+		const path = getSessionPath(id, options.cwd, claudeDir);
+		let parent = existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map(JSON.parse).at(-1)?.uuid : null;
+		const record = (role, content, uuid) => {
+			const builder = createSession({ projectPath: options.cwd, sessionId: id });
+			if (role === "user") builder.addUserMessage(content);
+			else builder.addAssistantMessage(content);
+			const value = { ...builder.records[0], ...(uuid ? { uuid } : {}), parentUuid: parent };
+			parent = value.uuid;
+			mkdirSync(dirname(path), { recursive: true });
+			appendFileSync(path, JSON.stringify(value) + "\n");
+			return value;
+		};
 		const gen = (async function* () {
-			call.prompt = (await prompt[Symbol.asyncIterator]().next()).value.message.content[0].text;
+			const initial = (await prompt[Symbol.asyncIterator]().next()).value;
+			call.prompt = initial.message.content[0].text;
+			record("user", initial.message.content, initial.uuid);
+			let blocks = [], block, json = "";
 			for (const step of script.steps) {
 				if (call.closed) return;
 				if (typeof step === "function") { await step(killed); continue; }
-				yield options.resume && step.type === "system" ? { ...step, session_id: options.resume } : step;
+				const event = step.event;
+				if (event?.type === "message_start") blocks = [];
+				if (event?.type === "content_block_start") {
+					block = { ...event.content_block };
+					blocks.push(block);
+					json = "";
+				}
+				if (event?.delta?.type === "text_delta") block.text += event.delta.text;
+				if (event?.delta?.type === "input_json_delta") json += event.delta.partial_json;
+				if (event?.type === "content_block_stop" && json) block.input = JSON.parse(json);
+				if (event?.type === "message_stop") {
+					const value = record("assistant", blocks);
+					yield { type: "assistant", parent_tool_use_id: null, uuid: value.uuid,
+						message: { id: value.uuid, model: model.id, content: blocks } };
+				}
+				yield step.type === "system" ? { ...step, session_id: id } : step;
+				if (step.type === "system") yield { type: "user", isReplay: true, parent_tool_use_id: null,
+					uuid: initial.uuid, session_id: id, message: initial.message };
 			}
 		})();
 		gen.interrupt = async () => {};
@@ -141,7 +173,8 @@ afterEach(async () => {
 	setQuery(null);
 });
 
-describe("tool-result routing", { timeout: 5000 }, () => {
+// Fresh module imports and real session-file writes need headroom under full-suite load.
+describe("tool-result routing", { timeout: 30000 }, () => {
 	for (const order of [[W, H], [H, W]]) {
 		it(`sends each result only to its own session's query when both park on one id (${order[0]} delivers first)`, async () => {
 			const parked = { [H]: await park(H, "toolu_same"), [W]: await park(W, "toolu_same") };
@@ -176,11 +209,11 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		assert.equal(host.c.pendingResults.size, 0, "nothing was delivered into it");
 	});
 
-	it("ends a cancelled call that arrives after the abort but before the context leaves the routing set", async () => {
+	it("ends a cancelled call after abort removes its context from routing", async () => {
 		const controller = new AbortController();
 		const host = await park(H, "toolu_a", controller.signal);
 		controller.abort();
-		assert.ok(activeQueryContexts.has(host.c), "precondition: the killed query has not finished yet");
+		assert.equal(activeQueryContexts.has(host.c), false, "abort removes routing immediately");
 
 		const late = streamSimple(model, { messages: [...host.history, toolResult("toolu_a")], tools },
 			{ sessionId: H, signal: controller.signal });
@@ -193,7 +226,7 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		assert.equal(calls.length, 1, "no query starts");
 	});
 
-	it("routes a result into a reused context after an earlier query on it was aborted", async () => {
+	it("routes a result into a fresh context after an earlier query was aborted", async () => {
 		const controller = new AbortController();
 		const first = await park(H, "toolu_a", controller.signal);
 		controller.abort();
@@ -201,7 +234,7 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		assert.equal(activeQueryContexts.has(first.c), false, "precondition: the killed query finished");
 
 		const second = await park(H, "toolu_b");
-		assert.equal(second.c, first.c, "precondition: the top-level context is reused");
+		assert.notEqual(second.c, first.c, "each query has its own context");
 		streamSimple(model, { messages: [...second.history, toolResult("toolu_b")], tools }, { sessionId: H, signal: liveSignal() });
 
 		assert.equal(second.c.pendingResults.get("toolu_b")?.content[0].text, "file", "the result reaches the new query");
@@ -221,23 +254,24 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		assert.equal(calls.length, 1, "no query starts");
 	});
 
-	it("advances the cursor for a cancelled late result while another session's query runs", async () => {
+	it("retains the recorded prefix for a cancelled late result while another session runs", async () => {
 		scripts.push({ label: "host turn 1", steps: [init("cc-h"), ...text("hi"), result("hi")] });
 		const u1 = user("first"), a1 = asst([{ type: "text", text: "hi" }], "stop");
 		await streamSimple(model, { messages: [u1], tools }, { sessionId: H, signal: liveSignal() }).result();
 		await park(W, "toolu_w");
+		const saved = getSharedSession(H);
 		const late = [u1, a1, user("second"), toolCall("toolu_h"), toolResult("toolu_h")];
 
 		await streamSimple(model, { messages: late, tools }, { sessionId: H, signal: cancelledSignal() }).result();
 
-		assert.equal(getSharedSession(H).cursor, late.length, "the host cursor counts the result");
+		assert.strictEqual(getSharedSession(H), saved, "cancelled delivery does not invent recorded progress");
 	});
 
 	it("rotates the session at abort, so a new query before the killed query finishes does not resume it", async () => {
 		scripts.push({ label: "host turn 1", steps: [init("cc-h"), ...text("hi"), result("hi")] });
 		const u1 = user("first"), a1 = asst([{ type: "text", text: "hi" }], "stop");
 		await streamSimple(model, { messages: [u1], tools }, { sessionId: H, signal: liveSignal() }).result();
-		setSharedSession(W, { sessionId: "cc-w", cursor: 2, cwd: process.cwd(), piSessionId: W });
+		setSharedSession(W, { ccSessionId: "cc-w", digests: [], uuids: [], cuttable: [], cwd: process.cwd(), model: model.id, dirtyTail: false });
 		const workerMirror = { ...getSharedSession(W) };
 		let releaseKill;
 		const killHeld = new Promise((r) => { releaseKill = r; });
@@ -246,13 +280,13 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		const controller = new AbortController();
 		const u2 = user("second");
 		const parked = await streamSimple(model, { messages: [u1, a1, u2], tools }, { sessionId: H, signal: controller.signal }).result();
-		assert.equal(calls[1].resume, "cc-h", "precondition: the parked query resumed the host's session");
+		assert.equal(calls[1].resume, calls[0].id, "precondition: the parked query resumed the host session");
 		try {
 			controller.abort();
 			const history = [u1, a1, u2, parked, toolResult("toolu_a")];
 			const cancelled = await streamSimple(model, { messages: history, tools }, { sessionId: H, signal: controller.signal }).result();
 			assert.equal(cancelled.stopReason, "stop", "precondition: the cancelled call ended the turn");
-			assert.ok([...activeQueryContexts].some((c) => c.aborted), "precondition: the killed query has not finished");
+			assert.equal([...activeQueryContexts].some((c) => c.piSessionId === H), false, "abort removes routing before exit");
 
 			scripts.push({ label: "host turn 3", steps: [init("cc-new"), ...text("next"), result("next")] });
 			const next = await streamSimple(model, { messages: [...history, user("third")], tools }, { sessionId: H, signal: liveSignal() }).result();
@@ -260,15 +294,15 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 			assert.equal(replyText(next), "next");
 			assert.equal(calls.length, 3);
 			assert.ok(calls[2].resume, "the new query resumes a rebuilt session");
-			assert.notEqual(calls[2].resume, "cc-h", "not the session being killed");
+			assert.notEqual(calls[2].id, calls[1].id, "not the session being killed");
 			assert.deepEqual(getSharedSession(W), workerMirror, "the sibling's mirror is untouched");
 		} finally {
 			releaseKill();
 		}
 		await settle();
 		assert.equal(calls[1].closed, true, "precondition: the killed query finished");
-		assert.equal(getSharedSession(H).forceRotate, undefined, "its end does not mark the rotated mirror again");
-		assert.ok(!getSharedSession(H).needsRebuild);
+		assert.equal(getSharedSession(H).ccSessionId, calls[2].id, "the old completion does not replace the new mirror");
+		assert.equal(getSharedSession(H).dirtyTail, false);
 	});
 
 	it("closes a parked query when its run signal aborts, with no further provider call", async () => {
@@ -288,7 +322,7 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		scripts.push({ label: "worker turn 1", steps: [init("cc-w"), ...text("hi"), result("hi")] });
 		const u1 = user("first"), a1 = asst([{ type: "text", text: "hi" }], "stop");
 		await streamSimple(model, { messages: [u1], tools }, { sessionId: W, signal: liveSignal() }).result();
-		assert.equal(getSharedSession(W).sessionId, "cc-w");
+		assert.equal(getSharedSession(W).ccSessionId, calls[0].id);
 		const host = await park(H, "toolu_same");
 		const late = [u1, a1, user("second"), toolCall("toolu_same"), toolResult("toolu_same", "worker file")];
 
@@ -299,7 +333,12 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 		scripts.push({ label: "worker resumed", steps: [init("cc-other"), ...text("worker resumed"), result("worker resumed")] });
 		const resumed = await streamSimple(model, { messages: late, tools }, { sessionId: W, signal: liveSignal() }).result();
 		assert.equal(calls.length, 3, "the uncancelled late result starts a fresh query");
-		assert.equal(calls[2].resume, "cc-w", "on the worker's own conversation");
+		assert.notEqual(calls[2].id, calls[1].id, "never on the host conversation");
+		assert.equal(getSharedSession(W).ccSessionId, calls[2].id);
+		const records = readFileSync(getSessionPath(calls[2].id, process.cwd(), claudeDir), "utf8");
+		assert.match(records, /first/);
+		assert.match(records, /second/);
+		assert.doesNotMatch(records, /task for pi-host/);
 		assert.match(calls[2].prompt, /interrupted and resumed/);
 		assert.equal(replyText(resumed), "worker resumed");
 		assert.equal(host.c.pendingResults.size, 0, "the host query received nothing");
@@ -307,11 +346,12 @@ describe("tool-result routing", { timeout: 5000 }, () => {
 	});
 });
 
-describe("session lifecycle across module copies", { timeout: 5000 }, () => {
-	const mirror = (piSessionId, sessionId) => ({ sessionId, cursor: 2, cwd: process.cwd(), piSessionId: piSessionId ?? undefined });
+describe("session lifecycle across module copies", { timeout: 30000 }, () => {
+	const mirror = (_piSessionId, ccSessionId) => ({ ccSessionId, digests: [], uuids: [], cuttable: [], cwd: process.cwd(), model: model.id, dirtyTail: false });
 
-	it("clears only the named session in the serving copy when a second copy delivers the event", async () => {
-		const { default: activateCopy } = await import("../src/index.js?worker-copy");
+	it("retains mirrors and clears only the named rewrite mark across two copies", async () => {
+		const copy = await import("../src/index.js?worker-copy");
+		const activateCopy = copy.default;
 		assert.notEqual(activateCopy, mod.default, "precondition: a separate module copy");
 		const workerPi = activateWithMockPi(activateCopy);
 		const W2 = "pi-worker-2";
@@ -319,52 +359,69 @@ describe("session lifecycle across module copies", { timeout: 5000 }, () => {
 		setSharedSession(W, mirror(W, "cc-w"));
 		setSharedSession(W2, mirror(W2, "cc-w2"));
 		setSharedSession(null, mirror(null, "cc-none"));
-		for (const id of [H, W, W2]) markRebuildForSession(id, "session_compact:threshold");
+		for (const id of [H, W, W2]) {
+			markRebuildForSession(id, "session_compact:threshold");
+			copy.__test.markRebuildForSession(id, "session_compact:threshold");
+		}
 
 		workerPi.emit("session_start", { reason: "startup" }, sessionCtx(W));
 		assert.ok(getSharedSession(W), "a startup does not clear");
 
 		workerPi.emit("session_shutdown", { reason: "quit" }, sessionCtx(W));
-		assert.equal(getSharedSession(W), null, "the ended session's mirror is gone from the serving copy");
+		assert.equal(getSharedSession(W).ccSessionId, "cc-w", "the ended session retains its durable mirror");
 		assert.equal(historyRewrittenBySession.has(W), false, "and so is its rewrite mark");
 
 		workerPi.emit("session_start", { reason: "new" }, sessionCtx(W2));
-		assert.equal(getSharedSession(W2), null, "a new session clears its own id");
+		assert.equal(getSharedSession(W2).ccSessionId, "cc-w2", "a new session retains its mirror for sync");
 		assert.equal(historyRewrittenBySession.has(W2), false);
 
-		assert.equal(getSharedSession(H)?.sessionId, "cc-h", "the sibling's mirror stays");
-		assert.equal(getSharedSession(H).needsRebuild, true, "with its rebuild mark");
+		assert.equal(getSharedSession(H)?.ccSessionId, "cc-h", "the sibling's mirror stays");
+		assert.equal(getSharedSession(H).dirtyTail, true, "with its rebuild mark");
 		assert.ok(historyRewrittenBySession.has(H), "and its rewrite mark");
-		assert.equal(getSharedSession(null)?.sessionId, "cc-none", "the (none) bucket stays");
+		assert.ok(copy.__test.historyRewrittenBySession.has(H), "the second copy keeps the host mark too");
+		assert.equal(copy.__test.historyRewrittenBySession.has(W), false);
+		const workerMirror = getSharedSession(W2), hostMirror = getSharedSession(H);
+		for (const reason of ["resume", "fork"]) {
+			markRebuildForSession(W2, "session_compact:threshold");
+			copy.__test.markRebuildForSession(W2, "session_compact:threshold");
+			assert.ok(historyRewrittenBySession.has(W2));
+			assert.ok(copy.__test.historyRewrittenBySession.has(W2));
+			workerPi.emit("session_start", { reason }, sessionCtx(W2));
+			assert.equal(historyRewrittenBySession.has(W2), false, `${reason} clears the serving copy mark`);
+			assert.equal(copy.__test.historyRewrittenBySession.has(W2), false, `${reason} clears the worker copy mark`);
+			assert.strictEqual(getSharedSession(W2), workerMirror, `${reason} retains the target mirror`);
+			assert.strictEqual(getSharedSession(H), hostMirror, `${reason} retains the sibling mirror`);
+			assert.ok(historyRewrittenBySession.has(H));
+			assert.ok(copy.__test.historyRewrittenBySession.has(H));
+		}
+		assert.equal(getSharedSession(null)?.ccSessionId, "cc-none", "the (none) bucket stays");
 	});
 
-	it("counts only the ending session's queries in the leak report", async () => {
-		await park(H, "toolu_h");
-
-		assert.equal(reportLeaks("session_shutdown", W), false, "a worker end ignores the host's parked query");
-		assert.equal(reportLeaks("session_shutdown", H), true, "the host's own end reports it");
-	});
-
-	it("reports a session's leaks from the copy that serves it, and skips a query still closing after its abort", async () => {
-		const closing = "pi-closing";
-		const { default: activateCopy } = await import("../src/index.js?worker-copy");
-		const workerPi = activateWithMockPi(activateCopy);
-		const closingPi = activateWithMockPi(mod.default);
-		await park(H, "toolu_h");
-		await park(W, "toolu_w");
+	it("closes a worker query in the serving copy without closing a sibling or warning about an abort", async () => {
+		const workerPi = activateWithMockPi((await import("../src/index.js?worker-copy")).default);
+		const host = await park(H, "toolu_h");
+		const worker = await park(W, "toolu_w");
 		const controller = new AbortController();
-		const killed = await park(closing, "toolu_c", controller.signal);
+		await park("pi-closing", "toolu_c", controller.signal);
 		controller.abort();
-		assert.ok(activeQueryContexts.has(killed.c), "precondition: the aborted query is still closing");
 
 		const warnings = leakWarnings(() => {
-			workerPi.emit("session_shutdown", { reason: "quit" }, sessionCtx(W));
-			closingPi.emit("session_shutdown", { reason: "quit" }, sessionCtx(closing));
+			workerPi.emit("session_shutdown", {}, sessionCtx(W));
+			workerPi.emit("session_shutdown", {}, sessionCtx("pi-closing"));
 		});
+		await settle();
+		assert.equal(calls[1].closed, true, "copy B closes the worker query owned by copy A");
+		assert.equal(activeQueryContexts.has(worker.c), false);
+		assert.ok(activeQueryContexts.has(host.c), "the host remains parked");
+		assert.equal(calls[0].closed, false);
+		assert.deepEqual(warnings, [], "parked and aborting queries are not leaked contexts");
+	});
 
-		assert.equal(warnings.filter((line) => line.includes(`session=${W.slice(0, 8)}`)).length, 1,
-			"the worker's live query is reported, though its end ran in another copy");
-		assert.equal(warnings.length, 1, "the closing query and the host's parked query are not");
+	it("warns only for a queryless context of the ending session", async () => {
+		const host = await park(H, "toolu_h");
+		host.c.activeQuery = null;
+		assert.deepEqual(leakWarnings(() => hostPi.emit("session_shutdown", {}, sessionCtx(W))), []);
+		assert.equal(leakWarnings(() => hostPi.emit("session_shutdown", {}, sessionCtx(H))).length, 1);
 	});
 
 	it("keeps the UI link of a session with a UI when a session without one starts", () => {
@@ -413,6 +470,19 @@ describe("session lifecycle across module copies", { timeout: 5000 }, () => {
 			assert.equal(next.registered.length, 1, "the next activation registers at load");
 		} finally {
 			globalThis[SERVING_MARKER] = hostMarker;
+		}
+	});
+
+	it("keeps lifecycle hook count constant across repeated activation and shutdown", async () => {
+		const copy = await import("../src/index.js?worker-copy");
+		const hooks = globalThis[Symbol.for("claude-bridge:sessionLifecycleHooks")];
+		const count = hooks.size;
+		for (let i = 0; i < 20; i++) {
+			const workerPi = activateWithMockPi(i % 2 ? copy.default : mod.default);
+			workerPi.emit("session_start", { reason: "startup" }, sessionCtx(`pi-hook-worker-${i}`));
+			assert.equal(hooks.size, count, "activation adds no lifecycle closure");
+			workerPi.emit("session_shutdown", { reason: "quit" }, sessionCtx(`pi-hook-worker-${i}`));
+			assert.equal(hooks.size, count, "shutdown leaves only module-scoped hooks");
 		}
 	});
 
