@@ -31,7 +31,7 @@ const MODEL = { id: "claude-sonnet-4-6", name: "Bridge", api: "claude-bridge", p
 const sent = [];
 __test.setQuery(({ options }) => Object.assign((async function* () {
 	sent.push(options.systemPrompt.append);
-	yield { type: "system", subtype: "init", session_id: `cc-${sent.length}` };
+	yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
 	yield { type: "result", subtype: "success", is_error: false, result: "ok" };
 })(), { interrupt: async () => {}, close: () => {} }));
 
